@@ -1,0 +1,21 @@
+# Ginger Crop Health Monitor — Dependencies
+# Training is done in Google Colab (ginger_cnn_training.ipynb).
+# The trained model is exported as ginger_disease_model.tflite and placed in streamlit_app/.
+
+streamlit>=1.22.0
+numpy
+pandas
+pillow
+plotly
+matplotlib
+
+# Real-time camera (WebRTC) — works on Python 3.13
+streamlit-webrtc>=0.47.0
+av
+opencv-python-headless
+
+# Bluetooth / COM port reader for ESP32 GingerMonitor hardware
+pyserial
+
+# TFLite inference — Python 3.13-compatible (replaces tensorflow for local inference)
+ai-edge-litert
