@@ -24,6 +24,9 @@ ashok_sadaware_ginger_crophealth/
 │   ├── utils.py                # Thresholds + alert logic
 │   └── models/
 │       └── ginger_disease_model.tflite   ← place trained model here
+├── assets/
+│   ├── training_curves.png     # Loss & accuracy plots from training
+│   └── confusion_matrix.png    # Validation set confusion matrix
 ├── ginger_cnn_training.ipynb   # Google Colab training notebook
 ├── requirements.txt
 ├── README.md
@@ -96,6 +99,40 @@ My Drive/Datasets/ginger_plant_dataset/
     Healthy/          ← healthy leaf images
 ```
 
+## Model Performance
+
+### Training Curves
+
+![Training Curves](assets/training_curves.png)
+
+The model was trained for **8 epochs** before EarlyStopping halted training.
+
+- **Loss (left):** Training loss decreases steadily from ~0.31 to ~0.19, showing the model is learning consistently. Validation loss fluctuates due to the relatively small dataset size but trends downward overall.
+- **Accuracy (right):** Training accuracy rises from ~86% to ~92%. Validation accuracy peaks at **~95.6%** at epoch 8 — the best checkpoint saved by ModelCheckpoint. The oscillation in validation accuracy is expected with a small validation set where each misclassified image has a larger percentage impact.
+
+### Confusion Matrix
+
+![Confusion Matrix](assets/confusion_matrix.png)
+
+Evaluated on the validation set (456 images total):
+
+| | Predicted Bacterial Wilt | Predicted Healthy |
+|---|---|---|
+| **Actual Bacterial Wilt** | ✅ 254 (True Positive) | ❌ 1 (False Negative) |
+| **Actual Healthy** | ❌ 18 (False Positive) | ✅ 183 (True Negative) |
+
+**Key metrics:**
+
+| Metric | Bacterial Wilt | Healthy |
+|---|---|---|
+| Precision | 93.4% (254/272) | 99.5% (183/184) |
+| Recall | **99.6%** (254/255) | 91.0% (183/201) |
+| F1-Score | ~96.4% | ~95.1% |
+
+**Overall validation accuracy: 95.6%**
+
+The model correctly identifies 254 out of 255 Bacterial Wilt cases — only 1 diseased leaf was missed (false negative). The 18 false positives (healthy leaves predicted as diseased) are acceptable in a disease-detection context where missing a real disease case is more costly than a false alarm. The high Bacterial Wilt recall makes this model well-suited for field use.
+
 ## Requirements
 
 | Package | Purpose |
@@ -107,3 +144,9 @@ My Drive/Datasets/ginger_plant_dataset/
 | pyserial | ESP32 Bluetooth COM port |
 | plotly | Interactive charts |
 | pillow, numpy, pandas | Image processing & data |
+
+---
+
+## Author
+
+**Ashok Sadaware**
