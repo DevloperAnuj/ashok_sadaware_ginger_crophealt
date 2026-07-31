@@ -1,0 +1,11 @@
+{
+  "Damage-Pest": 0,
+  "Dehydrated": 1,
+  "Healthy": 2,
+  "Leaf roller": 3,
+  "Leaf-blight": 4,
+  "Mite infestation": 5,
+  "Rhizome scale": 6,
+  "Shoot borer": 7,
+  "Thrips": 8
+}

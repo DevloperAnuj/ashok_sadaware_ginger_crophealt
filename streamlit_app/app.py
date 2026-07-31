@@ -11,8 +11,21 @@ from bluetooth_reader import BluetoothReader
 from camera_detection import render_live_detection_page
 from mock_sensors import SensorSimulator
 from model_loader import load_model
+from pest_prediction import load_pest_model, predict_pest
 from prediction import predict
-from utils import THRESHOLDS, get_alerts
+from utils import (
+    THRESHOLDS,
+    get_alerts,
+    get_moisture_class,
+    get_irrigation_decision,
+    get_npk_alerts,
+    get_moisture_led_color,
+    PEST_CLASSES,
+    PEST_KEYS,
+    get_pest_risk_level,
+    get_pest_alerts,
+    simulate_pest_detection,
+)
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -97,11 +110,18 @@ st.markdown("""
 
 # ── Sensor metadata ───────────────────────────────────────────────────────────
 SENSORS = [
-    {"key": "temperature",    "label": "Temperature",    "unit": "°C",   "icon": "🌡"},
-    {"key": "humidity",       "label": "Humidity",       "unit": "%",    "icon": "💧"},
-    {"key": "soil_moisture",  "label": "Soil Moisture",  "unit": "%",    "icon": "🌱"},
-    {"key": "soil_ph",        "label": "Soil pH",        "unit": "",     "icon": "⚗"},
-    {"key": "light_intensity","label": "Light",          "unit": "lux",  "icon": "☀"},
+    # Soil group
+    {"key": "soil_moisture",       "label": "Soil Moisture",    "unit": "%",    "icon": "🌱"},
+    {"key": "soil_temperature",    "label": "Soil Temp",        "unit": "°C",   "icon": "🌡"},
+    {"key": "soil_ph",             "label": "Soil pH",          "unit": "",     "icon": "⚗"},
+    {"key": "electrical_conductivity", "label": "EC",           "unit": "mS/cm","icon": "⚡"},
+    # NPK group
+    {"key": "nitrogen",            "label": "Nitrogen (N)",     "unit": "ppm",  "icon": "🧪"},
+    {"key": "phosphorus",          "label": "Phosphorus (P)",   "unit": "ppm",  "icon": "🧪"},
+    {"key": "potassium",           "label": "Potassium (K)",    "unit": "ppm",  "icon": "🧪"},
+    # Environment group
+    {"key": "rainfall",            "label": "Rainfall",         "unit": "mm",   "icon": "🌧"},
+    {"key": "days_since_irrigation","label": "Days Since Irr.", "unit": "d",    "icon": "📅"},
 ]
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -115,6 +135,14 @@ if "data_source" not in st.session_state:
     st.session_state.data_source = "Historical Data"
 if "bt_reader" not in st.session_state:
     st.session_state.bt_reader = BluetoothReader()
+if "irrigation_relay_on" not in st.session_state:
+    st.session_state.irrigation_relay_on = False
+if "irrigation_history" not in st.session_state:
+    st.session_state.irrigation_history: list[dict] = []
+if "pest_detection_result" not in st.session_state:
+    st.session_state.pest_detection_result: dict | None = None
+if "spray_history" not in st.session_state:
+    st.session_state.spray_history: list[dict] = []
 
 # ── Sensor tick — runs on every rerun regardless of page ─────────────────────
 _bt: BluetoothReader = st.session_state.bt_reader
@@ -124,9 +152,21 @@ if st.session_state.data_source == "Bluetooth":
     if _bt.connected:
         _bt_data = _bt.get_latest()
         if _bt_data:
-            # Hardware has no light sensor — keep light from last known or simulator
-            _light = (st.session_state.current_data or {}).get("light_intensity") or _sim.read()["light_intensity"]
-            current_data = {**_bt_data, "light_intensity": _light}
+            # Hardware may not have all Module 1 sensors — fill missing from simulator
+            _sim_data = _sim.read()
+            _light = (st.session_state.current_data or {}).get("light_intensity") or _sim_data["light_intensity"]
+            current_data = {
+                **_bt_data,
+                "light_intensity": _light,
+                # Module 1: fill missing sensors from simulator
+                "soil_temperature": _bt_data.get("soil_temperature") or _sim_data["soil_temperature"],
+                "electrical_conductivity": _bt_data.get("electrical_conductivity") or _sim_data["electrical_conductivity"],
+                "nitrogen": _bt_data.get("nitrogen") or _sim_data["nitrogen"],
+                "phosphorus": _bt_data.get("phosphorus") or _sim_data["phosphorus"],
+                "potassium": _bt_data.get("potassium") or _sim_data["potassium"],
+                "rainfall": _bt_data.get("rainfall") or _sim_data["rainfall"],
+                "days_since_irrigation": _bt_data.get("days_since_irrigation") or _sim_data["days_since_irrigation"],
+            }
             st.session_state.current_data = current_data
             st.session_state.history.append({**current_data, "timestamp": datetime.now()})
         else:
@@ -150,7 +190,7 @@ st.sidebar.markdown('<hr style="border-color:rgba(76,175,80,0.2);margin:0.6rem 0
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Leaf Detection", "Live Detection", "Sensor Data", "Alerts", "User Guide"],
+    ["Dashboard", "Leaf Detection", "Live Detection", "Pest Monitoring", "Irrigation Control", "Sensor Data", "Alerts", "User Guide"],
     label_visibility="collapsed",
 )
 
@@ -257,34 +297,89 @@ if st.session_state.data_source == "Bluetooth" and not _bt.connected:
 
 def compute_health_score(data: dict) -> int:
     score = 100
+
+    # Ambient temperature
     t = data["temperature"]
     if t >= THRESHOLDS["temperature"]["critical_high"] or t <= THRESHOLDS["temperature"]["critical_low"]:
-        score -= 28
+        score -= 16
     elif t >= THRESHOLDS["temperature"]["warning_high"] or t <= THRESHOLDS["temperature"]["warning_low"]:
-        score -= 12
+        score -= 8
 
+    # Humidity
     h = data["humidity"]
     if h >= THRESHOLDS["humidity"]["critical_high"] or h <= THRESHOLDS["humidity"]["critical_low"]:
-        score -= 22
-    elif h >= THRESHOLDS["humidity"]["warning_high"]:
         score -= 10
+    elif h >= THRESHOLDS["humidity"]["warning_high"]:
+        score -= 5
 
+    # Soil moisture (5-level)
     m = data["soil_moisture"]
-    if m >= THRESHOLDS["soil_moisture"]["critical_high"] or m <= THRESHOLDS["soil_moisture"]["critical_low"]:
-        score -= 20
-    elif m <= THRESHOLDS["soil_moisture"]["warning_low"]:
+    if m >= 85 or m < 25:
+        score -= 18
+    elif m >= 70 or m < 40:
         score -= 8
 
+    # Soil pH
     ph = data["soil_ph"]
     if ph <= THRESHOLDS["soil_ph"]["critical_low"] or ph >= THRESHOLDS["soil_ph"]["critical_high"]:
-        score -= 18
-    elif ph < THRESHOLDS["soil_ph"]["optimal_low"] or ph > THRESHOLDS["soil_ph"]["optimal_high"]:
-        score -= 8
-
-    lx = data["light_intensity"]
-    if lx <= THRESHOLDS["light_intensity"]["critical_low"]:
         score -= 12
+    elif ph < THRESHOLDS["soil_ph"]["optimal_low"] or ph > THRESHOLDS["soil_ph"]["optimal_high"]:
+        score -= 6
+
+    # Light intensity
+    lx = data.get("light_intensity", 420)
+    if lx <= THRESHOLDS["light_intensity"]["critical_low"]:
+        score -= 6
     elif lx <= THRESHOLDS["light_intensity"]["warning_low"]:
+        score -= 3
+
+    # Soil temperature
+    st = data["soil_temperature"]
+    sth = THRESHOLDS["soil_temperature"]
+    if st >= sth["critical_high"] or st <= sth["critical_low"]:
+        score -= 10
+    elif st >= sth["warning_high"] or st <= sth["warning_low"]:
+        score -= 5
+
+    # Electrical conductivity
+    ec = data["electrical_conductivity"]
+    ech = THRESHOLDS["electrical_conductivity"]
+    if ec >= ech["critical_high"] or ec <= ech["critical_low"]:
+        score -= 8
+    elif ec >= ech["warning_high"] or ec <= ech["warning_low"]:
+        score -= 4
+
+    # NPK levels
+    n = data["nitrogen"]
+    if n <= THRESHOLDS["nitrogen"]["critical_low"]:
+        score -= 6
+    elif n <= THRESHOLDS["nitrogen"]["warning_low"]:
+        score -= 3
+
+    p = data["phosphorus"]
+    if p <= THRESHOLDS["phosphorus"]["critical_low"]:
+        score -= 6
+    elif p <= THRESHOLDS["phosphorus"]["warning_low"]:
+        score -= 3
+
+    k = data["potassium"]
+    if k <= THRESHOLDS["potassium"]["critical_low"]:
+        score -= 6
+    elif k <= THRESHOLDS["potassium"]["warning_low"]:
+        score -= 3
+
+    # Rainfall
+    rain = data.get("rainfall", 0)
+    if rain >= THRESHOLDS["rainfall"]["critical_high"]:
+        score -= 8
+    elif rain >= THRESHOLDS["rainfall"]["warning_high"]:
+        score -= 4
+
+    # Days since irrigation
+    dsi = data.get("days_since_irrigation", 0)
+    if dsi > 14:
+        score -= 10
+    elif dsi > 7:
         score -= 5
 
     return max(0, score)
@@ -299,14 +394,29 @@ def _sensor_color(key: str, value: float) -> str:
         if value >= t["critical_high"] or value <= t["critical_low"]: return "#f44336"
         if value >= t["warning_high"]:                                 return "#ff9800"
     elif key == "soil_moisture":
-        if value >= t["critical_high"] or value <= t["critical_low"]: return "#f44336"
-        if value <= t["warning_low"]:                                  return "#ff9800"
+        if value >= 85 or value < 25: return "#f44336"
+        if value >= 70 or value < 40: return "#ff9800"
     elif key == "soil_ph":
         if value <= t["critical_low"]  or value >= t["critical_high"]: return "#f44336"
         if value < t["optimal_low"]    or value > t["optimal_high"]:   return "#ff9800"
     elif key == "light_intensity":
         if value <= t["critical_low"]: return "#f44336"
         if value <= t["warning_low"]:  return "#ff9800"
+    elif key == "soil_temperature":
+        if value >= t["critical_high"] or value <= t["critical_low"]: return "#f44336"
+        if value >= t["warning_high"]  or value <= t["warning_low"]:  return "#ff9800"
+    elif key == "electrical_conductivity":
+        if value >= t["critical_high"] or value <= t["critical_low"]: return "#f44336"
+        if value >= t["warning_high"]  or value <= t["warning_low"]:  return "#ff9800"
+    elif key in ("nitrogen", "phosphorus", "potassium"):
+        if value <= t.get("critical_low", 0): return "#f44336"
+        if value <= t.get("warning_low", 0):  return "#ff9800"
+    elif key == "rainfall":
+        if value >= t.get("critical_high", 999): return "#f44336"
+        if value >= t.get("warning_high", 999):  return "#ff9800"
+    elif key == "days_since_irrigation":
+        if value > 14: return "#f44336"
+        if value > 7:  return "#ff9800"
     return "#4caf50"
 
 
@@ -390,7 +500,7 @@ if page == "Dashboard":
 
     c_score, c_status = st.columns([1, 2])
     with c_score:
-        st.plotly_chart(gauge_fig, width="stretch", config={"staticPlot": True})
+        st.plotly_chart(gauge_fig, use_container_width=True, config={"staticPlot": True})
     with c_status:
         st.markdown('<div class="section-label">Active Conditions</div>', unsafe_allow_html=True)
         if not alerts:
@@ -405,66 +515,191 @@ if page == "Dashboard":
 
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
 
-    # ── Sensor Cards (3 + 2 layout) ───────────────────────────────────────────
+    # ── Sensor Cards (3×3 grid) ────────────────────────────────────────────────
     st.markdown('<div class="section-label">Live Sensor Readings</div>', unsafe_allow_html=True)
 
     recent_vals = {s["key"]: [h[s["key"]] for h in history[-40:]] for s in SENSORS}
 
-    row1 = st.columns(3)
-    row2 = st.columns(3)
-    grid = row1 + row2[:2] + [row2[2]]  # 5 sensors + empty last slot
+    for row_i in range(3):
+        cols = st.columns(3)
+        for col_i in range(3):
+            idx = row_i * 3 + col_i
+            if idx >= len(SENSORS):
+                break
+            sensor = SENSORS[idx]
+            key   = sensor["key"]
+            val   = current_data[key]
+            delta = val - prev[key]
+            color = _sensor_color(key, val)
+            spark_vals = recent_vals[key]
 
-    for i, sensor in enumerate(SENSORS):
-        key   = sensor["key"]
-        val   = current_data[key]
-        delta = val - prev[key]
-        color = _sensor_color(key, val)
-        spark_vals = recent_vals[key]
+            with cols[col_i]:
+                with st.container(border=True):
+                    # Special formatting for NPK and pH (show decimals)
+                    if key == "soil_ph":
+                        delta_str = f"{delta:+.3f}"
+                        val_str = f"{val:.2f}"
+                    elif key == "electrical_conductivity":
+                        delta_str = f"{delta:+.3f}"
+                        val_str = f"{val:.2f}"
+                    elif key == "days_since_irrigation":
+                        delta_str = f"{delta:+.2f}"
+                        val_str = f"{val:.1f}"
+                    elif key == "rainfall":
+                        delta_str = f"{delta:+.2f}"
+                        val_str = f"{val:.1f}"
+                    else:
+                        delta_str = f"{delta:+.2f}"
+                        val_str = f"{val:.1f}"
 
-        col = (row1 + row2)[i]
-        with col:
-            with st.container(border=True):
-                st.metric(
-                    label=f"{sensor['icon']}  {sensor['label']}",
-                    value=f"{val:.1f} {sensor['unit']}".strip(),
-                    delta=f"{delta:+.2f}" if key != "soil_ph" else f"{delta:+.3f}",
-                    delta_color="normal",
-                )
-                if len(spark_vals) > 2:
-                    st.plotly_chart(
-                        make_sparkline(spark_vals, color),
-                        width="stretch",
-                        config={"staticPlot": True},
+                    st.metric(
+                        label=f"{sensor['icon']}  {sensor['label']}",
+                        value=f"{val_str} {sensor['unit']}".strip(),
+                        delta=delta_str,
+                        delta_color="normal",
                     )
+                    if len(spark_vals) > 2:
+                        st.plotly_chart(
+                            make_sparkline(spark_vals, color),
+                            use_container_width=True,
+                            config={"staticPlot": True},
+                        )
 
-    # Last column of row2 — mini sensor trend overview
-    with row2[2]:
+    # ── Normalized overlay chart ───────────────────────────────────────────────
+    st.markdown('<div class="section-label">All Sensors — Normalized Trend (40 reads)</div>', unsafe_allow_html=True)
+    if len(history) > 3:
+        df_mini = pd.DataFrame(history[-40:])
+        norm_fig = go.Figure()
+        palette = ["#4caf50","#2196f3","#ff9800","#e91e63","#ffeb3b","#9c27b0","#00bcd4","#ff5722","#795548"]
+        for j, s in enumerate(SENSORS):
+            vals = df_mini[s["key"]].tolist()
+            lo, hi = min(vals), max(vals)
+            normalised = [(v - lo) / (hi - lo + 1e-9) for v in vals]
+            norm_fig.add_trace(go.Scatter(
+                y=normalised, mode="lines",
+                name=s["label"],
+                line=dict(color=palette[j % len(palette)], width=1.5),
+            ))
+        norm_fig.update_layout(
+            **plotly_base(140, margin=dict(l=0, r=0, t=28, b=0)),
+            legend=dict(font=dict(size=9), orientation="h", y=-0.3),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False, range=[-0.05, 1.05]),
+        )
+        st.plotly_chart(norm_fig, use_container_width=True, config={"staticPlot": True})
+
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+
+    # ── Moisture Classification & Irrigation Panel ─────────────────────────────
+    m_class = get_moisture_class(current_data["soil_moisture"])
+    irr_decision = get_irrigation_decision(m_class["class_name"])
+
+    col_mc, col_irr = st.columns([1, 1])
+    with col_mc:
         with st.container(border=True):
-            st.markdown("**All Sensors — 40 reads**")
-            if len(history) > 3:
-                df_mini = pd.DataFrame(history[-40:])
-                norm_fig = go.Figure()
-                palette = ["#4caf50","#2196f3","#ff9800","#e91e63","#ffeb3b"]
-                for j, s in enumerate(SENSORS):
-                    vals = df_mini[s["key"]].tolist()
-                    lo, hi = min(vals), max(vals)
-                    normalised = [(v - lo) / (hi - lo + 1e-9) for v in vals]
-                    norm_fig.add_trace(go.Scatter(
-                        y=normalised, mode="lines",
-                        name=s["label"],
-                        line=dict(color=palette[j], width=1.5),
-                    ))
-                norm_fig.update_layout(
-                    **plotly_base(140, margin=dict(l=0, r=0, t=28, b=0)),
-                    legend=dict(font=dict(size=9), orientation="h", y=-0.3),
-                    xaxis=dict(visible=False),
-                    yaxis=dict(visible=False, range=[-0.05, 1.05]),
-                )
-                st.plotly_chart(norm_fig, width="stretch", config={"staticPlot": True})
+            led_color = m_class["led_color"]
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:12px;margin-bottom:6px'>"
+                f"<span style='display:inline-block;width:16px;height:16px;border-radius:50%;"
+                f"background:{led_color};box-shadow:0 0 8px {led_color}80;'></span>"
+                f"<span style='font-size:1.1rem;font-weight:700;'>Moisture: {m_class['label']}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<span style='color:#aaa;font-size:0.85rem'>Range: {m_class['range_label']} · "
+                f"Current: {current_data['soil_moisture']:.1f}%</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"<div style='margin-top:8px;padding:8px;border-radius:8px;background:#ffffff08;font-size:0.9rem'>{irr_decision['message']}</div>", unsafe_allow_html=True)
+
+    with col_irr:
+        with st.container(border=True):
+            st.markdown("**💧 Irrigation Control**")
+            st.markdown(
+                f"<span style='color:#aaa;font-size:0.85rem'>Days since last irrigation: "
+                f"<b>{current_data['days_since_irrigation']:.0f}</b></span>",
+                unsafe_allow_html=True,
+            )
+            relay_status = "🟢 ON" if st.session_state.irrigation_relay_on else "🔴 OFF"
+            st.markdown(f"<span style='font-size:0.9rem'>Relay: <b>{relay_status}</b> · Action: <b>{irr_decision['action']}</b></span>", unsafe_allow_html=True)
+            if irr_decision["relay"] == "ON" and not st.session_state.irrigation_relay_on:
+                if st.button("💧  Activate Irrigation Relay", use_container_width=True):
+                    st.session_state.irrigation_relay_on = True
+                    st.session_state.irrigation_history.append({
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "action": "Relay ON",
+                        "moisture": f"{current_data['soil_moisture']:.1f}%",
+                    })
+                    _sim.mark_irrigated()
+                    st.rerun()
+            if st.session_state.irrigation_relay_on:
+                if st.button("⏹  Turn Relay OFF", use_container_width=True):
+                    st.session_state.irrigation_relay_on = False
+                    st.session_state.irrigation_history.append({
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "action": "Relay OFF",
+                        "moisture": f"{current_data['soil_moisture']:.1f}%",
+                    })
+                    st.rerun()
+
+    # ── NPK & pH Status Panel ──────────────────────────────────────────────────
+    npk_alerts = get_npk_alerts(current_data)
+    st.markdown('<div class="section-label">NPK & pH Status</div>', unsafe_allow_html=True)
+    if npk_alerts:
+        for a in npk_alerts:
+            if a["type"] == "error":
+                st.error(a["message"], icon="🚨")
+            else:
+                st.warning(a["message"], icon="⚠️")
+    else:
+        st.success("All NPK levels and pH within optimal range.")
+
+    # ── NPK summary row ────────────────────────────────────────────────────────
+    n_val = current_data["nitrogen"]
+    p_val = current_data["phosphorus"]
+    k_val = current_data["potassium"]
+    c_n, c_p, c_k = st.columns(3)
+    with c_n:
+        n_color = _sensor_color("nitrogen", n_val)
+        st.markdown(f"<span style='color:{n_color};font-weight:700'>N: {n_val:.0f} ppm</span>", unsafe_allow_html=True)
+        st.caption("Optimal: 80–150 ppm")
+    with c_p:
+        p_color = _sensor_color("phosphorus", p_val)
+        st.markdown(f"<span style='color:{p_color};font-weight:700'>P: {p_val:.0f} ppm</span>", unsafe_allow_html=True)
+        st.caption("Optimal: 20–40 ppm")
+    with c_k:
+        k_color = _sensor_color("potassium", k_val)
+        st.markdown(f"<span style='color:{k_color};font-weight:700'>K: {k_val:.0f} ppm</span>", unsafe_allow_html=True)
+        st.caption("Optimal: 100–200 ppm")
+
+    # ── Pest Risk Card ──────────────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Pest Risk Assessment</div>', unsafe_allow_html=True)
+    pest_risk = get_pest_risk_level(current_data)
+    pest_alerts = get_pest_alerts(current_data)
+    col_pr1, col_pr2 = st.columns([1, 2])
+    with col_pr1:
+        risk_color = pest_risk["color"]
+        st.markdown(
+            f"<div style='text-align:center;padding:1rem;border-radius:12px;"
+            f"background:{risk_color}15;border:2px solid {risk_color}60;'>"
+            f"<div style='font-size:0.8rem;color:#aaa;text-transform:uppercase;letter-spacing:0.1em'>Pest Risk</div>"
+            f"<div style='font-size:1.8rem;font-weight:900;color:{risk_color}'>{pest_risk['level']}</div>"
+            f"<div style='color:#aaa;font-size:0.8rem'>Days since spray: {current_data.get('days_since_last_spray', 0):.0f}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with col_pr2:
+        st.markdown(f"<div style='padding:8px;font-size:0.9rem'>{pest_risk['message']}</div>", unsafe_allow_html=True)
+        if pest_alerts:
+            for a in pest_alerts:
+                if a["type"] == "error":
+                    st.error(a["message"], icon="🐛")
+                else:
+                    st.warning(a["message"], icon="🐛")
 
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
     if st.session_state.data_source == "Bluetooth":
-        # Always auto-refresh when reading from hardware
         time.sleep(2)
         st.rerun()
     else:
@@ -510,20 +745,25 @@ elif page == "Leaf Detection":
         # ── Top row: image + prediction ──────────────────────────────────────
         col_img, col_pred = st.columns([1, 1], gap="large")
         with col_img:
-            st.image(pil_img, caption="Uploaded image", width="stretch")
+            st.image(pil_img, caption="Uploaded image", use_column_width="always")
 
         with col_pred:
-            label, confidence = None, None
+            label, confidence, all_probs = None, None, None
             if model is not None:
                 with st.spinner("Running MobileNetV2…"):
-                    label, confidence = predict(model, pil_img)
+                    label, confidence, all_probs = predict(model, pil_img)
 
             if label is not None:
-                prob_healthy = confidence if label == "Healthy" else 1.0 - confidence
+                # Map multi-class outputs to Healthy vs Unhealthy
+                is_healthy = label == "Healthy"
+                prob_healthy = confidence if is_healthy else 1.0 - confidence
                 prob_disease = 1.0 - prob_healthy
 
                 if confidence < 0.60:
                     st.warning(f"**Low Confidence · {label}** — {confidence*100:.1f} %\nRetake photo in better lighting.")
+                elif is_healthy:
+                    st.success(f"### 🌿 Healthy Plant\n**Confidence: {confidence*100:.1f} %**")
+                    st.markdown("Maintain current conditions. Continue regular monitoring.")
                 elif label == "Bacterial_Wilt":
                     st.error(f"### 🦠 Bacterial Wilt Detected\n**Confidence: {confidence*100:.1f} %**")
                     st.markdown("""
@@ -532,9 +772,25 @@ elif page == "Leaf Detection":
 - Remove & isolate infected rhizomes.
 - Improve drainage, stop overhead irrigation.
 """)
+                elif label == "Leaf-blight":
+                    st.error(f"### 🍂 Leaf Blight Detected\n**Confidence: {confidence*100:.1f} %**")
+                    st.markdown("""
+**Immediate Actions:**
+- Apply Mancozeb 0.25% or Copper oxychloride 0.3%.
+- Remove severely affected leaves.
+- Improve air circulation, avoid overhead irrigation.
+""")
+                elif label == "Dehydrated":
+                    st.warning(f"### 💧 Dehydration Symptoms\n**Confidence: {confidence*100:.1f} %**")
+                    st.markdown("""
+**Immediate Actions:**
+- Check soil moisture and irrigate immediately.
+- Apply mulch to retain soil moisture.
+- Monitor for recovery within 24 hours.
+""")
                 else:
-                    st.success(f"### 🌿 Healthy Plant\n**Confidence: {confidence*100:.1f} %**")
-                    st.markdown("Maintain current conditions. Continue regular monitoring.")
+                    st.warning(f"### 🐛 {label} Detected\n**Confidence: {confidence*100:.1f} %**")
+                    st.markdown(f"Check the **Pest Monitoring** page for detailed treatment recommendations.")
             else:
                 st.info("Model not loaded — showing image analysis only below.")
                 prob_healthy, prob_disease = 0.5, 0.5  # placeholder for charts
@@ -578,7 +834,7 @@ elif page == "Leaf Detection":
                     },
                 ))
                 fig_gauge.update_layout(**plotly_base(300, margin=dict(l=20,r=20,t=20,b=20)))
-                st.plotly_chart(fig_gauge, width="stretch", config={"staticPlot": True})
+                st.plotly_chart(fig_gauge, use_container_width=True, config={"staticPlot": True})
                 st.caption(
                     f"The model is **{confidence*100:.1f}% confident** this leaf is **{label}**. "
                     f"Predictions below 60% are flagged as low-confidence. "
@@ -590,36 +846,67 @@ elif page == "Leaf Detection":
         # Tab 2: Class Probabilities
         with tab2:
             if label is not None:
-                fig_bar = go.Figure()
-                fig_bar.add_trace(go.Bar(
-                    x=[prob_disease * 100, prob_healthy * 100],
-                    y=["Bacterial Wilt", "Healthy"],
-                    orientation="h",
-                    marker=dict(
-                        color=[
-                            f"rgba(244,67,54,{0.4 + 0.5 * prob_disease})",
-                            f"rgba(76,175,80,{0.4 + 0.5 * prob_healthy})",
-                        ],
-                        line=dict(color=["#f44336","#4caf50"], width=1.5),
-                    ),
-                    text=[f"{prob_disease*100:.1f}%", f"{prob_healthy*100:.1f}%"],
-                    textposition="inside",
-                    insidetextanchor="middle",
-                    textfont=dict(size=15, color="white"),
-                ))
-                fig_bar.update_layout(
-                    **plotly_base(220),
-                    xaxis=dict(title="Probability (%)", range=[0, 100], gridcolor="#333"),
-                    yaxis=dict(title=""),
-                    showlegend=False,
-                    bargap=0.35,
-                )
-                st.plotly_chart(fig_bar, width="stretch", config={"staticPlot": True})
-                st.caption(
-                    f"P(Bacterial Wilt) = **{prob_disease*100:.1f}%** · "
-                    f"P(Healthy) = **{prob_healthy*100:.1f}%**. "
-                    f"The binary sigmoid output maps directly to these two complementary probabilities."
-                )
+                if all_probs is not None:
+                    # Multi-class model — show all 9 classes
+                    cls_names = [p[0] for p in all_probs]
+                    cls_vals  = [p[1] * 100 for p in all_probs]
+                    colors = ["#4caf50" if n == "Healthy" else "#f44336" if n in ("Leaf-blight", "Bacterial_Wilt") else "#ff9800" for n in cls_names]
+                    fig_bar = go.Figure()
+                    fig_bar.add_trace(go.Bar(
+                        x=cls_vals,
+                        y=cls_names,
+                        orientation="h",
+                        marker=dict(color=colors, line=dict(color=colors, width=1.5)),
+                        text=[f"{v:.1f}%" for v in cls_vals],
+                        textposition="inside",
+                        insidetextanchor="middle",
+                        textfont=dict(size=13, color="white"),
+                    ))
+                    fig_bar.update_layout(
+                        **plotly_base(300),
+                        xaxis=dict(title="Probability (%)", range=[0, 100], gridcolor="#333"),
+                        yaxis=dict(title=""),
+                        showlegend=False,
+                        bargap=0.25,
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True, config={"staticPlot": True})
+                    st.caption(
+                        f"Top prediction: **{label}** ({confidence*100:.1f}%). "
+                        f"All 9 classes sorted by probability. "
+                        f"The softmax output sums to 100%."
+                    )
+                else:
+                    # Binary model — show 2 classes
+                    fig_bar = go.Figure()
+                    fig_bar.add_trace(go.Bar(
+                        x=[prob_disease * 100, prob_healthy * 100],
+                        y=["Bacterial Wilt", "Healthy"],
+                        orientation="h",
+                        marker=dict(
+                            color=[
+                                f"rgba(244,67,54,{0.4 + 0.5 * prob_disease})",
+                                f"rgba(76,175,80,{0.4 + 0.5 * prob_healthy})",
+                            ],
+                            line=dict(color=["#f44336","#4caf50"], width=1.5),
+                        ),
+                        text=[f"{prob_disease*100:.1f}%", f"{prob_healthy*100:.1f}%"],
+                        textposition="inside",
+                        insidetextanchor="middle",
+                        textfont=dict(size=15, color="white"),
+                    ))
+                    fig_bar.update_layout(
+                        **plotly_base(220),
+                        xaxis=dict(title="Probability (%)", range=[0, 100], gridcolor="#333"),
+                        yaxis=dict(title=""),
+                        showlegend=False,
+                        bargap=0.35,
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True, config={"staticPlot": True})
+                    st.caption(
+                        f"P(Bacterial Wilt) = **{prob_disease*100:.1f}%** · "
+                        f"P(Healthy) = **{prob_healthy*100:.1f}%**. "
+                        f"The binary sigmoid output maps directly to these two complementary probabilities."
+                    )
             else:
                 st.info("Run the model to see class probabilities.")
 
@@ -642,7 +929,7 @@ elif page == "Leaf Detection":
                 yaxis=dict(title="Pixel Count", gridcolor="#333"),
                 legend=dict(orientation="h", y=1.08),
             )
-            st.plotly_chart(fig_rgb, width="stretch", config={"staticPlot": True})
+            st.plotly_chart(fig_rgb, use_container_width=True, config={"staticPlot": True})
 
             g_mean = float(g_ch.mean())
             r_mean = float(r_ch.mean())
@@ -695,9 +982,9 @@ elif page == "Leaf Detection":
 
             gc1, gc2 = st.columns(2)
             with gc1:
-                st.plotly_chart(fig_green, width="stretch", config={"staticPlot": True})
+                st.plotly_chart(fig_green, use_container_width=True, config={"staticPlot": True})
             with gc2:
-                st.plotly_chart(fig_bright, width="stretch", config={"staticPlot": True})
+                st.plotly_chart(fig_bright, use_container_width=True, config={"staticPlot": True})
 
             # Colour region grid (3x3 mean colour heatmap)
             h_px, w_px = 224, 224
@@ -728,7 +1015,7 @@ elif page == "Leaf Detection":
                 title=dict(text="Green-Dominance Spatial Heatmap (7×7 grid)", font=dict(size=13)),
                 xaxis=dict(visible=False), yaxis=dict(visible=False, autorange="reversed"),
             )
-            st.plotly_chart(fig_heatmap, width="stretch", config={"staticPlot": True})
+            st.plotly_chart(fig_heatmap, use_container_width=True, config={"staticPlot": True})
             st.caption(
                 f"**Green pixel ratio: {green_pct:.1f}%** — pixels where green channel "
                 f"dominates red and blue. "
@@ -748,7 +1035,417 @@ elif page == "Live Detection":
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PAGE: Sensor Data
+# PAGE: Pest Monitoring
+# ═════════════════════════════════════════════════════════════════════════════
+elif page == "Pest Monitoring":
+    st.markdown('<div class="page-title">Pest Infestation Monitoring</div>', unsafe_allow_html=True)
+    st.caption("Upload a ginger leaf, stem, or rhizome image — MobileNetV2 pest classification with treatment recommendations")
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+
+    # ── Load the real pest model ─────────────────────────────────────────────────
+    pest_model = load_pest_model()
+    if pest_model is None:
+        st.info(
+            "**Pest model not available.** Place `ginger_pest_model.tflite` and "
+            "`class_indices.json` in `streamlit_app/models/`. "
+            "Using simulated detection as fallback.",
+            icon="ℹ️",
+        )
+
+    # ── Section 1: Image Upload & Detection ────────────────────────────────────
+    st.markdown('<div class="section-label">Upload & Detect</div>', unsafe_allow_html=True)
+    col_upload, col_info = st.columns([1, 1])
+    with col_upload:
+        uploaded = st.file_uploader(
+            "Upload leaf / stem / rhizome image (JPG / PNG)",
+            type=["jpg", "jpeg", "png"],
+            key="pest_uploader",
+        )
+    with col_info:
+        st.markdown(
+            f"<div style='padding:8px;font-size:0.85rem;color:#aaa'>"
+            f"<b>Sensor Fusion Inputs:</b><br>"
+            f"🌡 Temp: {current_data['temperature']:.1f}°C · "
+            f"💧 Humidity: {current_data['humidity']:.1f}%<br>"
+            f"📅 Days since last spray: {current_data.get('days_since_last_spray', 0):.0f}<br>"
+            f"🐛 Pest risk: <b>{get_pest_risk_level(current_data)['level']}</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    if uploaded is not None:
+        pil_img = Image.open(uploaded).convert("RGB")
+
+        col_img, col_result = st.columns([1, 1], gap="large")
+        with col_img:
+            st.image(pil_img, caption="Uploaded image", use_column_width="always")
+
+        with col_result:
+            if st.button("🔍  Run Pest Detection", use_container_width=True, type="primary"):
+                with st.spinner("Analyzing image for pest infestation…"):
+                    if pest_model is not None:
+                        # Use the real TFLite model
+                        class_name, confidence, probs = predict_pest(pest_model, pil_img)
+                        if class_name is not None:
+                            # Look up pest info from PEST_CLASSES
+                            pest_info = PEST_CLASSES.get(class_name, {})
+                            result = {
+                                "pest_key": class_name,
+                                "class_name": pest_info.get("class_name", class_name),
+                                "causative_agent": pest_info.get("causative_agent"),
+                                "visual_symptoms": pest_info.get("visual_symptoms", "No description"),
+                                "severity": pest_info.get("severity", "Moderate"),
+                                "severity_color": pest_info.get("severity_color", "#ff9800"),
+                                "recommended_pesticide": pest_info.get("recommended_pesticide", "Consult local expert"),
+                                "alert_message": pest_info.get("alert_message", "Pest detected — take action."),
+                                "preventive_action": pest_info.get("preventive_action", "Monitor regularly."),
+                                "confidence": round(confidence, 3),
+                                "all_probs": probs.tolist() if probs is not None else None,
+                            }
+                        else:
+                            result = None
+                    else:
+                        # Fallback to simulated detection
+                        result = simulate_pest_detection()
+                    st.session_state.pest_detection_result = result
+
+            if st.session_state.pest_detection_result:
+                r = st.session_state.pest_detection_result
+                sev_color = r["severity_color"]
+
+                if r["class_name"] == "Healthy":
+                    st.success(f"### 🌿 {r['class_name']}\n**Confidence: {r['confidence']*100:.1f}%**")
+                elif r["severity"] == "Critical":
+                    st.error(f"### 🐛 {r['class_name']} Detected\n**Confidence: {r['confidence']*100:.1f}%**\n**Severity: Critical**", icon="🚨")
+                else:
+                    st.warning(f"### 🐛 {r['class_name']} Detected\n**Confidence: {r['confidence']*100:.1f}%**\n**Severity: Moderate**", icon="⚠️")
+
+                st.markdown(
+                    f"<div style='margin-top:8px;padding:10px;border-radius:8px;"
+                    f"background:{sev_color}10;border:1px solid {sev_color}40;font-size:0.9rem'>"
+                    f"<b>Causative Agent:</b> {r['causative_agent'] or 'N/A'}<br>"
+                    f"<b>Symptoms:</b> {r['visual_symptoms']}<br>"
+                    f"<b>Pesticide:</b> {r['recommended_pesticide']}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+        # ── Section 2: Analysis Tabs ────────────────────────────────────────────
+        if st.session_state.pest_detection_result:
+            r = st.session_state.pest_detection_result
+            st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-label">Pest Analysis — Recommendations</div>', unsafe_allow_html=True)
+
+            t1, t2, t3, t4 = st.tabs([
+                "Pest Identification",
+                "Treatment Recommendation",
+                "Preventive Actions",
+                "Sensor Correlation",
+            ])
+
+            # Tab 1: Pest Identification
+            with t1:
+                sev_color = r["severity_color"]
+                fig_gauge = go.Figure(go.Indicator(
+                    mode="gauge+number+delta",
+                    value=r["confidence"] * 100,
+                    delta={"reference": 60, "valueformat": ".1f", "suffix": "% vs threshold"},
+                    title={"text": f"Detection Confidence · <b>{r['class_name']}</b>", "font": {"size": 14}},
+                    number={"suffix": " %", "font": {"size": 42, "color": sev_color}},
+                    gauge={
+                        "axis": {"range": [0, 100], "ticksuffix": "%", "nticks": 6},
+                        "bar":  {"color": sev_color, "thickness": 0.3},
+                        "bgcolor": "rgba(0,0,0,0)",
+                        "borderwidth": 0,
+                        "steps": [
+                            {"range": [0,  40], "color": "rgba(244,67,54,0.18)"},
+                            {"range": [40, 60], "color": "rgba(255,152,0,0.18)"},
+                            {"range": [60, 80], "color": "rgba(139,195,74,0.15)"},
+                            {"range": [80,100], "color": "rgba(76,175,80,0.15)"},
+                        ],
+                        "threshold": {
+                            "line": {"color": "rgba(255,255,255,0.67)", "width": 2},
+                            "thickness": 0.85, "value": 60,
+                        },
+                    },
+                ))
+                fig_gauge.update_layout(**plotly_base(300, margin=dict(l=20,r=20,t=20,b=20)))
+                st.plotly_chart(fig_gauge, use_container_width=True, config={"staticPlot": True})
+
+                # Severity badge
+                severity_badge = (
+                    f'<span class="pill-crit">{r["severity"]}</span>'
+                    if r["severity"] == "Critical"
+                    else f'<span class="pill-warn">{r["severity"]}</span>'
+                    if r["severity"] == "Moderate"
+                    else f'<span class="pill-ok">{r["severity"]}</span>'
+                )
+                st.markdown(
+                    f"<div style='font-size:0.9rem'>"
+                    f"<b>Pest:</b> {r['class_name']}<br>"
+                    f"<b>Agent:</b> {r['causative_agent'] or 'N/A'}<br>"
+                    f"<b>Severity:</b> {severity_badge}<br>"
+                    f"<b>Symptoms:</b> {r['visual_symptoms']}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Tab 2: Treatment Recommendation
+            with t2:
+                st.markdown(f"### Recommended Pesticide")
+                st.info(r["recommended_pesticide"])
+                st.markdown("### Alert Message")
+                st.warning(r["alert_message"])
+                st.markdown("### Application Notes")
+                st.markdown(
+                    "- Apply during early morning or late evening when beneficial insects are less active.\n"
+                    "- Ensure thorough coverage of affected plant parts.\n"
+                    "- Rotate pesticides with different modes of action to prevent resistance.\n"
+                    "- Follow recommended pre-harvest interval before collecting rhizomes."
+                )
+
+            # Tab 3: Preventive Actions
+            with t3:
+                st.markdown(f"### Preventive Measures")
+                st.success(r["preventive_action"])
+                st.markdown("### Cultural Practices")
+                st.markdown(
+                    "- Maintain field hygiene — remove weed hosts and crop debris.\n"
+                    "- Practice crop rotation with non-host crops (cereals, legumes).\n"
+                    "- Ensure proper spacing for air circulation.\n"
+                    "- Avoid overhead irrigation to reduce leaf wetness.\n"
+                    "- Use certified disease-free seed rhizomes.\n"
+                    "- Install pheromone traps and sticky traps for monitoring."
+                )
+
+            # Tab 4: Sensor Correlation
+            with t4:
+                pest_risk = get_pest_risk_level(current_data)
+                risk_color = pest_risk["color"]
+                st.markdown(
+                    f"<div style='text-align:center;padding:1rem;border-radius:12px;"
+                    f"background:{risk_color}15;border:2px solid {risk_color}60;'>"
+                    f"<div style='font-size:0.8rem;color:#aaa;text-transform:uppercase'>Current Pest Risk</div>"
+                    f"<div style='font-size:2rem;font-weight:900;color:{risk_color}'>{pest_risk['level']}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<div style='margin-top:12px;font-size:0.9rem'>"
+                    f"<b>Environmental Conditions:</b><br>"
+                    f"• Temperature: {current_data['temperature']:.1f}°C "
+                    f"{'⚠️' if 22 <= current_data['temperature'] <= 35 else '✅'}"
+                    f" (favorable range: 22–35°C)<br>"
+                    f"• Humidity: {current_data['humidity']:.1f}% "
+                    f"{'⚠️' if current_data['humidity'] > 70 else '✅'}"
+                    f" (high risk: >70%)<br>"
+                    f"• Days since last spray: {current_data.get('days_since_last_spray', 0):.0f} "
+                    f"{'⚠️' if current_data.get('days_since_last_spray', 0) > 14 else '✅'}"
+                    f" (overdue: >14 days)<br>"
+                    f"• Pest risk score: {current_data.get('pest_risk_score', 0):.2f} / 1.0"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── Section 3: Spray Schedule Control ──────────────────────────────────────
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Spray Schedule</div>', unsafe_allow_html=True)
+
+    col_s1, col_s2, col_s3 = st.columns([1, 1, 1])
+    with col_s1:
+        dsls = current_data.get("days_since_last_spray", 0)
+        spray_color = "#f44336" if dsls > 14 else ("#ff9800" if dsls > 7 else "#4caf50")
+        st.markdown(
+            f"<div style='text-align:center;padding:1rem;border-radius:12px;"
+            f"background:{spray_color}10;border:1px solid {spray_color}40'>"
+            f"<div style='font-size:0.75rem;color:#aaa;text-transform:uppercase'>Days Since Last Spray</div>"
+            f"<div style='font-size:2.5rem;font-weight:900;color:{spray_color}'>{dsls:.0f}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with col_s2:
+        st.markdown("<div style='padding-top:12px'>", unsafe_allow_html=True)
+        if st.button("🧴  Mark Sprayed Today", use_container_width=True, type="primary"):
+            st.session_state.pest_detection_result = None
+            st.session_state.spray_history.append({
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "action": "Pesticide spray applied",
+                "pest_risk_before": pest_risk['level'],
+            })
+            _sim.mark_sprayed()
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    with col_s3:
+        pest_risk = get_pest_risk_level(current_data)
+        st.markdown(
+            f"<div style='text-align:center;padding:12px;font-size:0.85rem;color:#aaa'>"
+            f"<b>Recommended schedule:</b> spray every 14 days<br>"
+            f"<b>Current status:</b> {'⚠️ Overdue' if dsls > 14 else '✅ Within schedule'}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Spray History ──────────────────────────────────────────────────────────
+    if st.session_state.spray_history:
+        st.markdown('<div style="margin-top:12px"></div>', unsafe_allow_html=True)
+        st.markdown("**Spray History**")
+        st.dataframe(
+            pd.DataFrame(st.session_state.spray_history[-20:]),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(f"{len(st.session_state.spray_history)} spray event(s) recorded")
+
+    # ── Pest reference table ───────────────────────────────────────────────────
+    with st.expander("📖 Pest Identification Reference"):
+        pest_ref_data = []
+        for pk in PEST_KEYS:
+            p = PEST_CLASSES[pk]
+            pest_ref_data.append({
+                "Pest": p["class_name"],
+                "Agent": p["causative_agent"] or "—",
+                "Severity": p["severity"],
+                "Symptoms": p["visual_symptoms"],
+                "Pesticide": p["recommended_pesticide"],
+            })
+        st.dataframe(pd.DataFrame(pest_ref_data), use_container_width=True, hide_index=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PAGE: Irrigation Control
+# ═════════════════════════════════════════════════════════════════════════════
+elif page == "Irrigation Control":
+    st.markdown('<div class="page-title">Irrigation Control</div>', unsafe_allow_html=True)
+    st.caption("Soil moisture classification, relay control, and irrigation scheduling")
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+
+    m_class = get_moisture_class(current_data["soil_moisture"])
+    irr_decision = get_irrigation_decision(m_class["class_name"])
+
+    # ── Top: Moisture status + decision ────────────────────────────────────────
+    mc1, mc2 = st.columns([1, 1])
+    with mc1:
+        led_color = m_class["led_color"]
+        st.markdown(
+            f"<div style='text-align:center;padding:1.5rem;border-radius:16px;"
+            f"background:{led_color}15;border:2px solid {led_color}60;'>"
+            f"<span style='display:inline-block;width:24px;height:24px;border-radius:50%;"
+            f"background:{led_color};box-shadow:0 0 12px {led_color}80;'></span>"
+            f"<div style='font-size:2rem;font-weight:900;margin:8px 0;color:{led_color}'>{m_class['class_name']}</div>"
+            f"<div style='color:#aaa'>Soil Moisture: {current_data['soil_moisture']:.1f}% · "
+            f"Range: {m_class['range_label']}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    with mc2:
+        with st.container(border=True):
+            st.markdown("**📋 Irrigation Decision**")
+            st.markdown(f"<div style='padding:8px;border-radius:8px;background:#ffffff08;font-size:0.95rem'>{irr_decision['message']}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='margin-top:8px;color:#aaa;font-size:0.85rem'>"
+                        f"Action: <b>{irr_decision['action']}</b> · "
+                        f"Relay: <b>{irr_decision['relay']}</b> · "
+                        f"Next irrigation: <b>{'Now' if irr_decision['next_irrigation_min'] == 0 else f'{irr_decision['next_irrigation_min']} min' if irr_decision['next_irrigation_min'] else 'N/A'}</b>"
+                        f"</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+
+    # ── Relay Control ──────────────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Relay Control</div>', unsafe_allow_html=True)
+    rc1, rc2, rc3 = st.columns([1, 1, 1])
+    with rc1:
+        relay_status = "🟢 ON" if st.session_state.irrigation_relay_on else "🔴 OFF"
+        st.markdown(f"<div style='text-align:center;font-size:1.2rem'><b>Relay: {relay_status}</b></div>", unsafe_allow_html=True)
+    with rc2:
+        if not st.session_state.irrigation_relay_on:
+            if st.button("💧  Turn Relay ON", use_container_width=True, type="primary"):
+                st.session_state.irrigation_relay_on = True
+                st.session_state.irrigation_history.append({
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "action": "Relay ON",
+                    "moisture": f"{current_data['soil_moisture']:.1f}%",
+                })
+                _sim.mark_irrigated()
+                st.rerun()
+        else:
+            if st.button("⏹  Turn Relay OFF", use_container_width=True, type="secondary"):
+                st.session_state.irrigation_relay_on = False
+                st.session_state.irrigation_history.append({
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "action": "Relay OFF",
+                    "moisture": f"{current_data['soil_moisture']:.1f}%",
+                })
+                st.rerun()
+    with rc3:
+        st.markdown(f"<div style='text-align:center;color:#aaa;font-size:0.85rem;padding-top:8px'>"
+                    f"Days since irrigation: <b>{current_data['days_since_irrigation']:.0f}</b></div>",
+                    unsafe_allow_html=True)
+
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+
+    # ── NPK Deficiency Summary ─────────────────────────────────────────────────
+    st.markdown('<div class="section-label">NPK & pH Deficiency Status</div>', unsafe_allow_html=True)
+    npk_alerts = get_npk_alerts(current_data)
+    if npk_alerts:
+        for a in npk_alerts:
+            if a["type"] == "error":
+                st.error(a["message"], icon="🚨")
+            else:
+                st.warning(a["message"], icon="⚠️")
+    else:
+        st.success("All NPK levels and pH within optimal range.")
+
+    # ── NPK side-by-side ───────────────────────────────────────────────────────
+    n_val = current_data["nitrogen"]
+    p_val = current_data["phosphorus"]
+    k_val = current_data["potassium"]
+    cn1, cn2, cn3 = st.columns(3)
+    with cn1:
+        n_color = _sensor_color("nitrogen", n_val)
+        st.markdown(f"<div style='text-align:center;padding:12px;border-radius:12px;background:{n_color}10;border:1px solid {n_color}40'>"
+                    f"<div style='font-size:1.1rem;font-weight:700;color:{n_color}'>N: {n_val:.0f} ppm</div>"
+                    f"<div style='color:#aaa;font-size:0.8rem'>Optimal: 80–150</div></div>",
+                    unsafe_allow_html=True)
+    with cn2:
+        p_color = _sensor_color("phosphorus", p_val)
+        st.markdown(f"<div style='text-align:center;padding:12px;border-radius:12px;background:{p_color}10;border:1px solid {p_color}40'>"
+                    f"<div style='font-size:1.1rem;font-weight:700;color:{p_color}'>P: {p_val:.0f} ppm</div>"
+                    f"<div style='color:#aaa;font-size:0.8rem'>Optimal: 20–40</div></div>",
+                    unsafe_allow_html=True)
+    with cn3:
+        k_color = _sensor_color("potassium", k_val)
+        st.markdown(f"<div style='text-align:center;padding:12px;border-radius:12px;background:{k_color}10;border:1px solid {k_color}40'>"
+                    f"<div style='font-size:1.1rem;font-weight:700;color:{k_color}'>K: {k_val:.0f} ppm</div>"
+                    f"<div style='color:#aaa;font-size:0.8rem'>Optimal: 100–200</div></div>",
+                    unsafe_allow_html=True)
+
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+
+    # ── Irrigation History ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Irrigation History</div>', unsafe_allow_html=True)
+    if st.session_state.irrigation_history:
+        st.dataframe(
+            pd.DataFrame(st.session_state.irrigation_history[-50:]),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(f"{len(st.session_state.irrigation_history)} event(s) recorded")
+    else:
+        st.info("No irrigation events recorded this session.")
+
+    # ── Moisture classification reference ──────────────────────────────────────
+    with st.expander("📖 Moisture Classification Reference"):
+        st.dataframe(
+            pd.DataFrame([
+                {"Level": "Critically Dry",    "Range": "< 25%",      "Severity": "Critical", "Action": "Irrigate immediately — 45 min drip"},
+                {"Level": "Moisture Deficit",  "Range": "25 – 40%",   "Severity": "Warning",  "Action": "Schedule irrigation within 6 hours"},
+                {"Level": "Optimal",           "Range": "40 – 70%",   "Severity": "Normal",   "Action": "No irrigation needed"},
+                {"Level": "Surplus Moisture",  "Range": "70 – 85%",   "Severity": "Warning",  "Action": "Suspend irrigation, open drainage"},
+                {"Level": "Waterlogged",       "Range": "> 85%",      "Severity": "Critical", "Action": "Immediate drainage required"},
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
 # ═════════════════════════════════════════════════════════════════════════════
 elif page == "Sensor Data":
     st.markdown('<div class="page-title">Sensor History</div>', unsafe_allow_html=True)
@@ -780,7 +1477,7 @@ elif page == "Sensor Data":
                 yaxis=dict(gridcolor="#2a2a2a", showgrid=True),
                 showlegend=False,
             )
-            st.plotly_chart(fig, width="stretch", config={"staticPlot": False})
+            st.plotly_chart(fig, use_container_width=True, config={"staticPlot": False})
 
         st.caption(f"{len(history)} readings stored · max 200 per session")
 
@@ -801,17 +1498,34 @@ elif page == "Alerts":
             else:
                 st.warning(a["message"], icon="⚠️")
 
+    # ── Pest alerts section ────────────────────────────────────────────────────
+    pest_alerts = get_pest_alerts(current_data)
+    if pest_alerts:
+        st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">🐛 Pest Risk Alerts</div>', unsafe_allow_html=True)
+        for a in pest_alerts:
+            if a["type"] == "error":
+                st.error(a["message"], icon="🐛")
+            else:
+                st.warning(a["message"], icon="🐛")
+
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
     st.markdown("**Optimal Ranges — Ginger Cultivation**")
     st.dataframe(
         pd.DataFrame([
-            {"Parameter": "Temperature",   "Optimal": "20 – 32 °C",  "Warning": "32 – 38 °C",        "Critical": "< 15 °C  or  > 38 °C"},
-            {"Parameter": "Humidity",      "Optimal": "40 – 75 %",   "Warning": "75 – 85 %",          "Critical": "< 30 %  or  > 85 %"},
-            {"Parameter": "Soil Moisture", "Optimal": "30 – 70 %",   "Warning": "< 30 %",             "Critical": "< 20 %  or  > 85 %"},
-            {"Parameter": "Soil pH",       "Optimal": "5.5 – 7.0",   "Warning": "4.5–5.5 or 7–8",     "Critical": "< 4.5  or  > 8.0"},
-            {"Parameter": "Light",         "Optimal": "100 – 800 lx","Warning": "50 – 100 lx",        "Critical": "< 50 lx"},
+            {"Parameter": "Ambient Temperature",   "Optimal": "20 – 32 °C",      "Warning": "32 – 38 °C",              "Critical": "< 15 °C  or  > 38 °C"},
+            {"Parameter": "Humidity",              "Optimal": "40 – 75 %",       "Warning": "75 – 85 %",                "Critical": "< 30 %  or  > 85 %"},
+            {"Parameter": "Soil Moisture",         "Optimal": "40 – 70 %",       "Warning": "25–40% or 70–85%",         "Critical": "< 25% or > 85%"},
+            {"Parameter": "Soil pH",               "Optimal": "5.5 – 7.0",       "Warning": "4.5–5.5 or 7–8",           "Critical": "< 4.5  or  > 8.0"},
+            {"Parameter": "Light Intensity",       "Optimal": "100 – 800 lx",    "Warning": "50 – 100 lx",              "Critical": "< 50 lx"},
+            {"Parameter": "Soil Temperature",      "Optimal": "20 – 30 °C",      "Warning": "30 – 35 °C  or 15–20°C",  "Critical": "< 15 °C  or  > 35 °C"},
+            {"Parameter": "EC (Electrical Cond.)", "Optimal": "0.5 – 1.5 mS/cm", "Warning": "1.5–2.5 mS/cm",          "Critical": "< 0.1  or  > 3.0 mS/cm"},
+            {"Parameter": "Nitrogen (N)",           "Optimal": "80 – 150 ppm",   "Warning": "60 – 80 ppm",              "Critical": "< 60 ppm"},
+            {"Parameter": "Phosphorus (P)",         "Optimal": "20 – 40 ppm",    "Warning": "15 – 20 ppm",              "Critical": "< 15 ppm"},
+            {"Parameter": "Potassium (K)",          "Optimal": "100 – 200 ppm",  "Warning": "80 – 100 ppm",             "Critical": "< 80 ppm"},
+            {"Parameter": "Rainfall",               "Optimal": "< 50 mm/day",    "Warning": "50 – 100 mm/day",          "Critical": "> 100 mm/day"},
         ]),
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )
 

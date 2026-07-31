@@ -1,0 +1,171 @@
+
+#include <DHT.h>
+#define DHTPIN 14
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+//******************************************
+
+
+
+#include <LiquidCrystal.h>
+
+LiquidCrystal lcd(18,19,21,17,5,22);
+
+//***********************
+
+#define DE_PIN 2
+#define RE_PIN 4
+// Modbus Commands
+const byte nitro[] = 
+{0x01,0x03,0x00,0x1E,0x00,0x01,0xE4,0x0C};
+
+const byte phos[] = 
+{0x01,0x03,0x00,0x1F,0x00,0x01,0xB5,0xCC};
+
+const byte pota[] = 
+{0x01,0x03,0x00,0x20,0x00,0x01,0x85,0xC0};
+
+byte buffer[8];
+byte buffer[8];
+// Sensor Pins
+
+#define PH_PIN    35
+#define mo  34
+
+
+float phValue = 0;
+int moist = 0;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(DE_PIN,OUTPUT);
+  pinMode(RE_PIN,OUTPUT);
+
+  pinMode(mo, INPUT);
+
+  lcd.begin(16, 2);
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Soil Monitor");
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
+  delay(2000);
+  lcd.clear();
+}
+
+void loop() {
+
+float t = dht.readTemperature();
+  float h = dht.readHumidity();
+
+
+  moist = analogRead(mo);
+
+Serial.print("RAW_m: ");
+Serial.println(moist);
+
+  // Read pH
+
+  int phRaw = analogRead(PH_PIN);
+  Serial.print("PH raw1:");
+  Serial.println(phRaw);
+  float voltagePH = phRaw * (3.3 / 4095.0);
+  Serial.print("voltagePH:");
+  Serial.println(voltagePH);
+  phValue = 2 * voltagePH;     // Adjust after calibration
+
+  
+
+  // Serial Monitor
+  Serial.println("----- Water Data -----");
+  Serial.print("M_Lvl: ");
+  Serial.println(moist);
+
+
+  Serial.print("pH: ");
+  Serial.println(phValue);
+
+  Serial.print("T: ");
+  Serial.println(t);
+
+  Serial.print("h: ");
+  Serial.println(h);
+  // LCD Display
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("M_L:");
+  lcd.print(moist);
+  lcd.print(" PH:");
+  lcd.print(phValue, 1);
+
+  lcd.setCursor(0, 1);
+ 
+  lcd.print("T:");
+  lcd.print(t);
+  lcd.print(" H:");
+  lcd.print(h);
+  delay(1500);
+int N = readNPK(nitro);
+  delay(200);
+  int P = readNPK(phos);
+  delay(200);
+  int K = readNPK(pota);
+  Serial.println("----------------");
+  Serial.print("Nitrogen : ");
+  Serial.print(N);
+  Serial.println(" mg/kg");
+
+  Serial.print("Phosphorus : ");
+  Serial.print(P);
+  Serial.println(" mg/kg");
+
+  Serial.print("Potassium : ");
+  Serial.print(K);
+  Serial.println(" mg/kg");
+  lcd.clear();
+
+  lcd.setCursor(0,0);
+  lcd.print("N:");
+  lcd.print(N);
+
+  lcd.print(" P:");
+  lcd.print(P);
+
+
+  lcd.setCursor(0,1);
+  lcd.print("K:");
+  lcd.print(K);
+  delay(2000);
+}
+int readNPK(const byte *command)
+{
+  int index = 0;
+   
+  digitalWrite(DE_PIN,HIGH);
+  digitalWrite(RE_PIN,HIGH);
+  delay(10);
+  Serial2.write(command,8);
+
+  unsigned long startTime = millis();
+  while(millis()-startTime < 500)
+  {
+    while(Serial2.available())
+    {
+      buffer[index++] = Serial2.read();
+    }
+
+ 
+  if(index >= 7)
+  {
+    Serial.print("RX : ");
+    for(int i=0;i<7;i++)
+    {
+      Serial.print(buffer[i],HEX);
+      Serial.print(" ");
+    }
+    
+  }
+  
+}
