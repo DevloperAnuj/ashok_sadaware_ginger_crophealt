@@ -115,8 +115,8 @@ class BluetoothReader:
             self.ser = serial.Serial(
                 port=port,
                 baudrate=115200,
-                timeout=1.0,
-                write_timeout=1.0,
+                timeout=3.0,
+                write_timeout=3.0,
             )
             self.port = port
             self.connected = True
@@ -129,7 +129,7 @@ class BluetoothReader:
             if self.ser.in_waiting:
                 self.ser.reset_input_buffer()
             return True
-        except serial.SerialException as exc:
+        except (serial.SerialException, OSError) as exc:
             self.error = str(exc)
             self.connected = False
             self.ser = None

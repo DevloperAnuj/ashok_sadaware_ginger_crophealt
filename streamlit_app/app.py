@@ -1,4 +1,4 @@
-import time
+﻿import time
 from datetime import datetime
 
 import numpy as np
@@ -267,7 +267,8 @@ if st.session_state.data_source == "Bluetooth":
         _log_lines = _bt.get_log()
         if _log_lines:
             with st.sidebar.expander("Serial Log", expanded=False):
-                st.code("\n".join(_log_lines[-30:]), language=None)
+                st.caption(f"Showing last {min(len(_log_lines), 25)} lines. Max 200 total.")
+                st.code("\n".join(_log_lines[-25:]), language=None)
     else:
         st.sidebar.info("Not connected — select the Bluetooth port above and click Connect.")
 
@@ -308,9 +309,9 @@ if st.session_state.data_source == "Bluetooth" and not _bt.connected:
     st.stop()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # HELPERS
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 def compute_health_score(data: dict) -> int:
     score = 100
@@ -475,9 +476,9 @@ def plotly_base(height: int = 280, margin: dict | None = None) -> dict:
     )
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PAGE: Dashboard
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 if page == "Dashboard":
     st.markdown('<div class="page-title">Farm Dashboard</div>', unsafe_allow_html=True)
     st.caption("Live IoT sensor readings — auto-updates on every refresh")
@@ -761,9 +762,9 @@ if page == "Dashboard":
                 st.rerun()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PAGE: Leaf Detection
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 elif page == "Leaf Detection":
     st.markdown('<div class="page-title">Leaf Disease Detection</div>', unsafe_allow_html=True)
     st.caption("Upload a ginger leaf photo — MobileNetV2 analyses and explains the result")
@@ -1073,18 +1074,18 @@ elif page == "Leaf Detection":
             )
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PAGE: Live Detection
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 elif page == "Live Detection":
     st.markdown('<div class="page-title">Live Camera Detection</div>', unsafe_allow_html=True)
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
     render_live_detection_page()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PAGE: Pest Monitoring
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 elif page == "Pest Monitoring":
     st.markdown('<div class="page-title">Pest Infestation Monitoring</div>', unsafe_allow_html=True)
     st.caption("Upload a ginger leaf, stem, or rhizome image — MobileNetV2 pest classification with treatment recommendations")
@@ -1359,9 +1360,9 @@ elif page == "Pest Monitoring":
         st.dataframe(pd.DataFrame(pest_ref_data), use_container_width=True, hide_index=True)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PAGE: Irrigation Control
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 elif page == "Irrigation Control":
     st.markdown('<div class="page-title">Irrigation Control</div>', unsafe_allow_html=True)
     st.caption("Soil moisture classification, relay control, and irrigation scheduling")
@@ -1494,9 +1495,9 @@ elif page == "Irrigation Control":
             use_container_width=True,
             hide_index=True,
         )
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PAGE: Yield Estimation
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 elif page == "Yield Estimation":
     st.markdown('<div class="page-title">Yield Estimation</div>', unsafe_allow_html=True)
     st.caption("Predict ginger harvest yield from sensor data — rule-based heuristic model (RandomForest-ready)")
@@ -1914,7 +1915,7 @@ The baseline of **125 q/ha** is the historical district average for ginger.
 > with a **Random Forest Regressor (50 trees, depth 8)** for higher accuracy.
 """)
 
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 elif page == "Sensor Data":
     st.markdown('<div class="page-title">Sensor History</div>', unsafe_allow_html=True)
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
@@ -1950,9 +1951,9 @@ elif page == "Sensor Data":
         st.caption(f"{len(history)} readings stored · max 200 per session")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PAGE: Alerts
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 elif page == "Alerts":
     st.markdown('<div class="page-title">Alerts & Recommendations</div>', unsafe_allow_html=True)
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
@@ -1998,9 +1999,9 @@ elif page == "Alerts":
     )
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PAGE: User Guide
-# ═════════════════════════════════════════════════════════════════════════════
+#═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 elif page == "User Guide":
     st.markdown('<div class="page-title">User Guide</div>', unsafe_allow_html=True)
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
