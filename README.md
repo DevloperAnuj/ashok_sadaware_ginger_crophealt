@@ -1,11 +1,13 @@
 # Ginger Crop Health Monitor
 
-A real-time IoT + AI dashboard for monitoring ginger farm conditions and detecting leaf disease using computer vision.
+A real-time IoT + AI dashboard for monitoring ginger farm conditions, detecting crop diseases and pests, and estimating yield.
 
 ## Features
 
-- **Live Sensor Dashboard** — Temperature, Humidity, Soil Moisture, Soil pH, Light Intensity with health score, sparklines, and threshold alerts
-- **Leaf Disease Detection** — Upload a ginger leaf photo; MobileNetV2 (TFLite) classifies it as Healthy or Bacterial Wilt with visual reasoning charts
+- **Live Sensor Dashboard** — Temperature, Humidity, Soil Moisture, Soil pH, Light Intensity, EC, NPK, Rainfall, Days Since Irrigation with health score, sparklines, and threshold alerts
+- **Leaf/Rhizome Disease & Pest Detection** — Upload an image (leaf, stem, or rhizome); MobileNetV2 (TFLite) classifies it into 9 categories (e.g., Healthy, Leaf-blight, Shoot borer) with visual reasoning charts
+- **Pest Infestation Monitoring** — Dedicated page for image-based pest detection, treatment recommendations, preventive actions, and correlation with environmental factors (temp, humidity, days since last spray)
+- **Yield Estimation** — Predicts expected harvest yield (q/ha) based on season-long sensor data, highlights limiting factors, and provides farmer action guidance
 - **Live Camera Detection** — Real-time webcam stream with per-frame AI overlay via WebRTC
 - **ESP32 Bluetooth Integration** — Read live sensor values from GingerMonitor hardware over a Bluetooth COM port
 - **Historical Data Mode** — Built-in sensor simulator for demo and testing without hardware
@@ -20,14 +22,20 @@ ashok_sadaware_ginger_crophealth/
 │   ├── camera_detection.py     # WebRTC live detection page
 │   ├── mock_sensors.py         # Sensor data simulator
 │   ├── model_loader.py         # TFLite model loader (cached)
-│   ├── prediction.py           # Image preprocessing + inference
+│   ├── pest_prediction.py      # Pest/disease image preprocessing + inference
+│   ├── prediction.py           # Legacy image preprocessing + inference (binary disease model)
 │   ├── utils.py                # Thresholds + alert logic
+│   ├── yield_estimation.py     # Yield estimation logic (rule-based heuristic, to be replaced by RandomForest)
 │   └── models/
-│       └── ginger_disease_model.tflite   ← place trained model here
-├── assets/
-│   ├── training_curves.png     # Loss & accuracy plots from training
-│   └── confusion_matrix.png    # Validation set confusion matrix
-├── ginger_cnn_training.ipynb   # Google Colab training notebook
+│       ├── class_indices.json            # Class name to index mapping for 9-class model
+│       ├── ginger_pest_model.tflite      # Float32 9-class pest/disease model
+│       ├── ginger_pest_model_int8.tflite # INT8 quantized 9-class pest/disease model
+│       ├── ginger_confusion_matrix.png   # Confusion matrix for 9-class model
+│       └── Untitled.png                  # Training curves for 9-class model (actually ginger_training_curves.png)
+├── assets/                       # Legacy model evaluation images (or external resources)
+│   ├── training_curves.png
+│   └── confusion_matrix.png
+├── ginger_pest_training.ipynb    # Google Colab training notebook for 9-class model
 ├── requirements.txt
 ├── README.md
 └── USER_MANUAL.md
@@ -43,14 +51,15 @@ pip install -r requirements.txt
 
 > Python 3.13 is supported. TensorFlow is not required — the app uses `ai-edge-litert` for TFLite inference.
 
-### 2. Add the Trained Model
+### 2. Add the Trained Model (9-Class Pest/Disease)
 
-Train the model in Google Colab using `ginger_cnn_training.ipynb`, then:
+Train the model in Google Colab using `ginger_pest_training.ipynb`, then:
 
-1. Run **Phase 9** in the notebook to convert and download `ginger_disease_model.tflite`
-2. Place the file inside `streamlit_app/models/`
+1. Run **Phase 9** in the notebook to convert and download `ginger_pest_model.tflite` (Float32) and/or `ginger_pest_model_int8.tflite` (INT8).
+2. Place the `.tflite` files and `class_indices.json` inside `streamlit_app/models/`.
 
-The app runs without the model file — AI features will be disabled until the model is present.
+> The app uses a unified 9-class model for both pest and disease detection. It will pick the Float32 model if available, otherwise the INT8 model.
+> The app runs without the model files — AI features will use simulated results until the models are present.
 
 ### 3. Run the App
 
@@ -75,9 +84,9 @@ The app supports live sensor readings from an **ESP32** running the `GingerMonit
 2. In the app sidebar, select **Bluetooth (ESP32)** as the data source
 3. Choose the COM port and click **Connect**
 
-## Model Training
+## Model Training (9-Class Pest/Disease Model)
 
-Training is done in **Google Colab** — no local GPU needed.
+Training is done in **Google Colab** using `ginger_pest_training.ipynb` — no local GPU needed.
 
 | Phase | What it does |
 |---|---|
@@ -89,49 +98,45 @@ Training is done in **Google Colab** — no local GPU needed.
 | 6 | Confusion matrix & classification report |
 | 7 | Sanity test on sample images |
 | 8 | Download `.h5` model |
-| 9 | Convert to TFLite + download `.tflite` |
+| 9 | Convert to TFLite (Float32 and INT8) + download `.tflite` and `class_indices.json` |
 
 **Dataset layout expected in Google Drive:**
 ```
 My Drive/Datasets/ginger_plant_dataset/
-  train/
-    Bacterial_Wilt/   ← diseased leaf images
-    Healthy/          ← healthy leaf images
+  combined/
+    Damage-Pest/       ← image folders for each of 9 classes
+    Dehydrated/
+    Healthy/
+    Leaf roller/
+    Leaf-blight/
+    Mite infestation/
+    Rhizome scale/
+    Shoot borer/
+    Thrips/
 ```
 
-## Model Performance
+
+## Model Performance (9-Class Pest/Disease Model)
 
 ### Training Curves
 
-![Training Curves](assets/training_curves.png)
+![Training Curves](streamlit_app/models/Untitled.png)
 
-The model was trained for **8 epochs** before EarlyStopping halted training.
+The unified 9-class MobileNetV2 model was trained for **37 epochs** with fine-tuning on the last 30 layers.
 
-- **Loss (left):** Training loss decreases steadily from ~0.31 to ~0.19, showing the model is learning consistently. Validation loss fluctuates due to the relatively small dataset size but trends downward overall.
-- **Accuracy (right):** Training accuracy rises from ~86% to ~92%. Validation accuracy peaks at **~95.6%** at epoch 8 — the best checkpoint saved by ModelCheckpoint. The oscillation in validation accuracy is expected with a small validation set where each misclassified image has a larger percentage impact.
+- **Loss (left):** Training loss decreases consistently to near zero. Validation loss shows a similar trend but with more fluctuation, indicating robust learning.
+- **Accuracy (right):** Training accuracy reached over 99%. Validation accuracy reached a peak of **~92%** after fine-tuning. This indicates good generalization to unseen images.
 
 ### Confusion Matrix
 
-![Confusion Matrix](assets/confusion_matrix.png)
+![Confusion Matrix](streamlit_app/models/ginger_confusion_matrix.png)
 
-Evaluated on the validation set (456 images total):
+Evaluated on the full validation set (approx. 3,000 images total):
 
-| | Predicted Bacterial Wilt | Predicted Healthy |
-|---|---|---|
-| **Actual Bacterial Wilt** | ✅ 254 (True Positive) | ❌ 1 (False Negative) |
-| **Actual Healthy** | ❌ 18 (False Positive) | ✅ 183 (True Negative) |
-
-**Key metrics:**
-
-| Metric | Bacterial Wilt | Healthy |
-|---|---|---|
-| Precision | 93.4% (254/272) | 99.5% (183/184) |
-| Recall | **99.6%** (254/255) | 91.0% (183/201) |
-| F1-Score | ~96.4% | ~95.1% |
-
-**Overall validation accuracy: 95.6%**
-
-The model correctly identifies 254 out of 255 Bacterial Wilt cases — only 1 diseased leaf was missed (false negative). The 18 false positives (healthy leaves predicted as diseased) are acceptable in a disease-detection context where missing a real disease case is more costly than a false alarm. The high Bacterial Wilt recall makes this model well-suited for field use.
+- The diagonal elements show the number of correct predictions for each class.
+- The off-diagonal elements show misclassifications. For example, some 'Dehydrated' leaves might be confused with 'Leaf-blight' or 'Healthy' in complex visual conditions.
+- The overall performance is strong across most classes, demonstrating the model's ability to distinguish between diverse pest and disease symptoms.
+- The model has a high recall for critical pest and disease classes, which is crucial for early intervention.
 
 ## Requirements
 
