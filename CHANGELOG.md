@@ -254,7 +254,110 @@ The client's specification is correct for **ESP32 on-device inference** — two 
 
 ## Module 3 — Disease Detection (Image-based TinyML)
 
-**Status:** ⏳ Pending
+**Status:** ✅ Implemented  
+**Date:** 2026-07-31  
+**Files modified:** `app.py`, `utils.py`, `prediction.py`, `model_loader.py`, `camera_detection.py`
+
+### Overview
+
+Module 3 provides disease detection for ginger plants using the same unified 9-class MobileNetV2 model (224×224) shared with Module 2. The client spec called for a separate EfficientNet-Lite model at 96×96 for disease detection, but we use a single unified model for reasons detailed in the [Model Design Decision](#model-design-decision-why-we-deviated-from-the-client-spec) section above.
+
+The spec's 6 disease classes are mapped as follows:
+
+| Spec Disease Class | Our Coverage | How |
+|-------------------|-------------|-----|
+| Healthy | ✅ Healthy | Direct class in the 9-class model |
+| Bacterial wilt | ✅ Bacterial_Wilt | Handled as a special case in Leaf Detection page — shows critical alert with bactericide recommendation |
+| Leaf spot | ✅ Leaf-blight | Covered by the Leaf-blight class (fungal leaf disease with necrotic spots, yellow halos) |
+| Chlorosis / nutrient deficiency | ✅ Dehydrated | Covered by the Dehydrated class (yellowing, wilting — cross-checked with NPK sensor data) |
+| Soft rot | ⚠️ Partially covered | Waterlogging alert in `get_alerts()` flags "risk of soft rot and bacterial wilt" — treated via sensor fusion rather than image classification |
+| Rhizome rot | ⚠️ Partially covered | Soil moisture & temperature monitoring triggers preventive alerts |
+
+### Leaf Detection Page (Primary Disease Detection Interface)
+
+**Location:** `streamlit_app/app.py` — lines 717–1025  
+**Entry point:** `"Leaf Detection"` in sidebar navigation
+
+The page is a full-featured disease diagnosis interface:
+
+**Section 1: Image Upload & Prediction**
+- File uploader for ginger leaf images (JPG / PNG)
+- Runs the unified 9-class TFLite model via `prediction.predict()`
+- Displays result with color-coded severity:
+  - 🟢 **Healthy** — green success card, confidence score
+  - 🦠 **Bacterial Wilt** — red error card with immediate action steps (bactericide, isolation, drainage)
+  - 🍂 **Leaf-blight** — red error card with fungicide recommendation (Mancozeb / Copper oxychloride)
+  - 💧 **Dehydration** — amber warning card with irrigation and mulching instructions
+  - 🐛 **Other classes** — generic pest message directing user to Pest Monitoring page
+- Low-confidence flagging (< 60% confidence) with retake suggestion
+
+**Section 2: Detection Analysis Tabs** (4 tabs)
+
+| Tab | Content |
+|-----|---------|
+| **Confidence Gauge** | Plotly gauge with 0–100% scale, 60% threshold line, color-coded bar (green/red by prediction) |
+| **Class Probabilities** | Horizontal bar chart showing all 9 class probabilities — multi-class (softmax) or binary (sigmoid) depending on model |
+| **RGB Channel Analysis** | Overlaid RGB histogram (64 bins), dominant channel detection, interpretation of red-shifted/dull histograms as disease indicators |
+| **Pixel Health Map** | Green-dominant pixel ratio gauge, brightness distribution histogram, 7×7 green-dominance spatial heatmap showing diseased regions as red patches |
+
+**Section 3: Sensor Fusion for Disease Risk**
+- Disease risk is not just image-based — the alerts system integrates:
+  - **Soil moisture** — waterlogging triggers "risk of soft rot and bacterial wilt" alert
+  - **Humidity** — critical high humidity triggers "high fungal disease risk" alert
+  - **Rainfall** — heavy rainfall triggers "risk of waterlogging and fungal outbreak" alert
+  - **Temperature** — combined with humidity for disease-favorable conditions
+
+### Live Camera Detection (Real-time Webcam)
+
+**Location:** `streamlit_app/camera_detection.py`  
+**Entry point:** `"Live Detection"` in sidebar navigation
+
+- Real-time leaf disease detection via WebRTC (webcam) using `streamlit-webrtc`
+- Runs inference every 12 frames (~0.5s at 24 fps) via `model_loader.load_model()` + `prediction.predict()`
+- Video overlay showing predicted class and confidence score:
+  - Green overlay for "Healthy"
+  - Red overlay for any disease detection
+- Graceful fallback if webcam packages not installed (`pip install streamlit-webrtc av opencv-python-headless`)
+- Low-confidence warnings (< 60%) with retake suggestion
+
+### Disease Alerts in the Alert System
+
+**Location:** `streamlit_app/utils.py` — `get_alerts()` function
+
+The following disease-related alerts are already integrated into the central alerts system:
+
+| Condition | Alert | Trigger |
+|-----------|-------|---------|
+| Waterlogged soil | "Risk of soft rot and bacterial wilt" | Soil moisture > 85% |
+| Critical humidity | "High fungal disease risk" | Humidity > 85% |
+| Heavy rainfall | "Risk of waterlogging and fungal outbreak" | Rainfall > 100 mm |
+| Warm + humid | "Favorable for pest outbreak" | Humidity > 75%, temp 25–35°C |
+
+### Model Architecture for Disease Detection
+
+Since Module 3 uses the same unified model as Module 2, the architecture is identical:
+
+- **Base:** MobileNetV2 (ImageNet weights, transfer learning)
+- **Input size:** 224×224 × 3 (RGB)
+- **Head:** Dense(256) → BatchNorm → Dropout(0.4) → Dense(128) → Dropout(0.3) → Dense(9, softmax)
+- **Fine-tuning:** Last 30 unfrozen layers with 10× lower learning rate
+- **Training:** 50 epochs with EarlyStopping (patience=7), ReduceLROnPlateau
+- **Quantization:** Float32 (10.4 MB) / INT8 (3.1 MB)
+
+See the [Model Design Decision](#model-design-decision-why-we-deviated-from-the-client-spec) section above for a detailed comparison with the client's EfficientNet-Lite 96×96 proposal.
+
+### Key Design Decisions
+
+1. **No separate disease model** — The client spec proposed a separate EfficientNet-Lite for disease detection. We use the unified 9-class model because:
+   - Disease and pest symptoms overlap (yellowing could be Bacterial wilt, Chlorosis, or Thrips)
+   - A single model learns to distinguish between all possibilities
+   - No routing logic needed (user doesn't need to pick "pest" vs. "disease" before uploading)
+
+2. **Sensor fusion supplements image classification** — Diseases like soft rot and rhizome rot are difficult to diagnose from leaf images alone (they affect the stem base and rhizome underground). The sensor-based alerts (waterlogging + humidity + rainfall) provide early warning where the image model cannot.
+
+3. **Leaf Detection page doubles as Disease Detection** — The page name says "Leaf Disease Detection" and classifies the full range of disease and pest conditions. The pest-specific page focuses on treatment recommendations and spray scheduling.
+
+4. **Real-time webcam as a deployment option** — `camera_detection.py` enables field use where a farmer can hold a leaf up to a webcam for instant diagnosis without file uploads.
 
 ---
 
