@@ -82,6 +82,7 @@ class BluetoothReader:
         self._buffer: str = ""
         self._latest: dict = {}
         self._log: list[str] = []
+        self._raw_log: list[str] = []  # All raw data received, for debugging
 
     # ── Static: list available Bluetooth COM ports ──────────────────────────
 
@@ -159,12 +160,33 @@ class BluetoothReader:
             return dict(self._latest)
 
         try:
+            raw = b""
+            # First try: non-blocking read of available data
             if self.ser.in_waiting > 0:
                 raw = self.ser.read(self.ser.in_waiting)
+            else:
+                # Second try: blocking read with short timeout
+                # Some Bluetooth adapters don't report in_waiting correctly
+                try:
+                    self.ser.timeout = 0.5
+                    raw = self.ser.read(1)  # Read at least 1 byte
+                    # Read any remaining bytes
+                    if self.ser.in_waiting > 0:
+                        raw += self.ser.read(self.ser.in_waiting)
+                    self.ser.timeout = 3.0  # Reset to original timeout
+                except Exception:
+                    self.ser.timeout = 3.0
+
+            if raw:
                 try:
                     text = raw.decode("utf-8", errors="ignore")
                 except Exception:
                     text = raw.decode("ascii", errors="ignore")
+
+                # Log raw data for debugging
+                self._raw_log.append(repr(raw))
+                if len(self._raw_log) > 50:
+                    self._raw_log = self._raw_log[-50:]
 
                 self._buffer += text
 
@@ -183,8 +205,12 @@ class BluetoothReader:
         return dict(self._latest)
 
     def get_log(self) -> list[str]:
-        """Return the raw serial log lines (up to 200)."""
+        """Return the parsed serial log lines (up to 200)."""
         return list(self._log)
+
+    def get_raw_log(self) -> list[str]:
+        """Return the raw byte-level log for debugging."""
+        return list(self._raw_log)
 
     # ── Internal parsing ────────────────────────────────────────────────────
 

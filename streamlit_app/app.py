@@ -269,6 +269,15 @@ if st.session_state.data_source == "Bluetooth":
             with st.sidebar.expander("Serial Log", expanded=False):
                 st.caption(f"Showing last {min(len(_log_lines), 25)} lines. Max 200 total.")
                 st.code("\n".join(_log_lines[-25:]), language=None)
+        else:
+            with st.sidebar.expander("Raw Bytes Log", expanded=False):
+                _raw_log = _bt.get_raw_log()
+                if _raw_log:
+                    st.caption(f"Raw bytes received ({len(_raw_log)} packets)")
+                    st.code("\n".join(_raw_log[-10:]), language=None)
+                else:
+                    st.caption("No raw bytes received yet.")
+                    st.info("Trying to read data... Check if the ESP32 firmware is running and sending data.")
     else:
         st.sidebar.info("Not connected — select the Bluetooth port above and click Connect.")
 
