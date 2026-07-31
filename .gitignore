@@ -20,3 +20,13 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Dataset images (15k+ images — too large for git)
+ginger_plant_dataset/
+
+# ML Model files (large binary files)
+streamlit_app/models/*.tflite
+streamlit_app/models/*.h5
+streamlit_app/models/*.png
+streamlit_app/models/Old/
+streamlit_app/models/Sanity\ Test/
