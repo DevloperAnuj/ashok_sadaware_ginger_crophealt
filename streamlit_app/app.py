@@ -26,6 +26,11 @@ from utils import (
     get_pest_alerts,
     simulate_pest_detection,
 )
+from yield_estimation import (
+    YIELD_BANDS,
+    YIELD_BAND_KEYS,
+    simulate_yield_prediction,
+)
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -143,6 +148,18 @@ if "pest_detection_result" not in st.session_state:
     st.session_state.pest_detection_result: dict | None = None
 if "spray_history" not in st.session_state:
     st.session_state.spray_history: list[dict] = []
+if "yield_prediction" not in st.session_state:
+    st.session_state.yield_prediction: dict | None = None
+if "yield_history" not in st.session_state:
+    st.session_state.yield_history: list[dict] = []
+if "days_since_planting" not in st.session_state:
+    st.session_state.days_since_planting = 120.0
+if "planting_density" not in st.session_state:
+    st.session_state.planting_density = 12  # rhizomes/m²
+if "variety" not in st.session_state:
+    st.session_state.variety = "Local"
+if "mulching_applied" not in st.session_state:
+    st.session_state.mulching_applied = True
 
 # ── Sensor tick — runs on every rerun regardless of page ─────────────────────
 _bt: BluetoothReader = st.session_state.bt_reader
@@ -190,7 +207,7 @@ st.sidebar.markdown('<hr style="border-color:rgba(76,175,80,0.2);margin:0.6rem 0
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Leaf Detection", "Live Detection", "Pest Monitoring", "Irrigation Control", "Sensor Data", "Alerts", "User Guide"],
+    ["Dashboard", "Leaf Detection", "Live Detection", "Pest Monitoring", "Irrigation Control", "Yield Estimation", "Sensor Data", "Alerts", "User Guide"],
     label_visibility="collapsed",
 )
 
@@ -697,6 +714,37 @@ if page == "Dashboard":
                     st.error(a["message"], icon="🐛")
                 else:
                     st.warning(a["message"], icon="🐛")
+
+    # ── Yield Estimation Card ──────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Yield Forecast</div>', unsafe_allow_html=True)
+    _yield_data = {**current_data, "days_since_planting": st.session_state.days_since_planting}
+    _yield_result = simulate_yield_prediction(_yield_data)
+    _band = _yield_result["band_info"]
+    col_y1, col_y2 = st.columns([1, 2])
+    with col_y1:
+        st.markdown(
+            f"<div style='text-align:center;padding:1rem;border-radius:12px;"
+            f"background:{_band['color']}15;border:2px solid {_band['color']}60;'>"
+            f"<div style='font-size:0.8rem;color:#aaa;text-transform:uppercase;letter-spacing:0.1em'>Yield Forecast</div>"
+            f"<div style='font-size:1.8rem;font-weight:900;color:{_band['color']}'>{_yield_result['yield_qha']} q/ha</div>"
+            f"<div style='color:#aaa;font-size:0.8rem'>{_band['label']}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with col_y2:
+        st.markdown(
+            f"<div style='padding:8px;font-size:0.9rem'>{_band['farmer_action'][:120]}…</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"<div style='font-size:0.8rem;color:#888'>"
+            f"Baseline: {_yield_result['baseline']} q/ha · "
+            f"Your forecast: {_yield_result['yield_qha']} q/ha "
+            f"({_yield_result['vs_baseline']:+.1f}%) · "
+            f"Limiting factors: {_yield_result['limiting_factors'][0] if _yield_result['limiting_factors'] else 'None'}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
     if st.session_state.data_source == "Bluetooth":
@@ -1447,6 +1495,426 @@ elif page == "Irrigation Control":
             hide_index=True,
         )
 # ═════════════════════════════════════════════════════════════════════════════
+# PAGE: Yield Estimation
+# ═════════════════════════════════════════════════════════════════════════════
+elif page == "Yield Estimation":
+    st.markdown('<div class="page-title">Yield Estimation</div>', unsafe_allow_html=True)
+    st.caption("Predict ginger harvest yield from sensor data — rule-based heuristic model (RandomForest-ready)")
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+
+    # ── Increment days_since_planting on each read ──────────────────────────────
+    st.session_state.days_since_planting += 1.0 / 60.0
+    if st.session_state.days_since_planting > 270:
+        st.session_state.days_since_planting = 270.0
+
+    current_data["days_since_planting"] = st.session_state.days_since_planting
+    current_data["planting_density"] = st.session_state.planting_density
+    current_data["variety"] = st.session_state.variety
+    current_data["mulching_applied"] = st.session_state.mulching_applied
+
+    # ── Section 1: Season Inputs ────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Season Configuration</div>', unsafe_allow_html=True)
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+
+    with col_s1:
+        st.session_state.planting_density = st.number_input(
+            "Planting density (rhizomes/m²)",
+            min_value=6, max_value=20, value=st.session_state.planting_density,
+            step=1, help="Typical ginger: 10–15 rhizomes/m²",
+        )
+    with col_s2:
+        st.session_state.variety = st.selectbox(
+            "Variety / Cultivar",
+            ["Local", "Rio-de-Janeiro", "Varada", "Maran", "Himagiri", "Suprabha"],
+            index=["Local", "Rio-de-Janeiro", "Varada", "Maran", "Himagiri", "Suprabha"].index(st.session_state.variety)
+            if st.session_state.variety in ["Local", "Rio-de-Janeiro", "Varada", "Maran", "Himagiri", "Suprabha"]
+            else 0,
+        )
+    with col_s3:
+        st.session_state.mulching_applied = st.checkbox(
+            "Mulching applied", value=st.session_state.mulching_applied,
+            help="Organic mulch (straw / leaves) retains moisture and suppresses weeds",
+        )
+    with col_s4:
+        planting_days = st.number_input(
+            "Days since planting",
+            min_value=30, max_value=270, value=int(st.session_state.days_since_planting),
+            step=5, help="Approximate days since ginger rhizomes were planted",
+        )
+        st.session_state.days_since_planting = float(planting_days)
+
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+
+    # ── Section 2: Yield Prediction ────────────────────────────────────────────
+    st.markdown('<div class="section-label">Yield Forecast</div>', unsafe_allow_html=True)
+
+    col_run, col_info = st.columns([1, 2])
+    with col_run:
+        if st.button("📊  Run Yield Forecast", use_container_width=True, type="primary"):
+            with st.spinner("Computing yield estimate from sensor data…"):
+                result = simulate_yield_prediction(current_data)
+                st.session_state.yield_prediction = result
+                st.session_state.yield_history.append({
+                    **result,
+                    "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    "days_since_planting": st.session_state.days_since_planting,
+                })
+                if len(st.session_state.yield_history) > 100:
+                    st.session_state.yield_history = st.session_state.yield_history[-100:]
+
+    with col_info:
+        if st.session_state.yield_prediction:
+            r = st.session_state.yield_prediction
+            band = r["band_info"]
+            st.markdown(
+                f"<div style='padding:6px 0;font-size:0.85rem;color:#aaa'>"
+                f"Baseline: <b>{r['baseline']} q/ha</b> (district avg) · "
+                f"Your forecast: <b>{r['yield_qha']} q/ha</b> "
+                f"({r['vs_baseline']:+.1f}% vs baseline) · "
+                f"CI: {r['confidence_interval'][0]}–{r['confidence_interval'][1]} q/ha"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+
+    # ── Results display ─────────────────────────────────────────────────────────
+    if st.session_state.yield_prediction:
+        r = st.session_state.yield_prediction
+        band = r["band_info"]
+
+        # Top row: yield gauge + band card
+        col_gauge, col_band = st.columns([1, 1], gap="large")
+
+        with col_gauge:
+            fig_yield = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=r["yield_qha"],
+                delta={
+                    "reference": r["baseline"],
+                    "valueformat": ".1f",
+                    "suffix": " q/ha vs baseline",
+                    "position": "bottom",
+                },
+                title={
+                    "text": f"Predicted Yield · <b>{band['label']}</b>",
+                    "font": {"size": 14},
+                },
+                number={
+                    "suffix": " q/ha",
+                    "font": {"size": 44, "color": band["color"]},
+                },
+                gauge={
+                    "axis": {
+                        "range": [0, 250],
+                        "ticksuffix": " q/ha",
+                        "nticks": 6,
+                        "tickwidth": 1,
+                        "tickcolor": "#666",
+                    },
+                    "bar": {"color": band["color"], "thickness": 0.3},
+                    "bgcolor": "rgba(0,0,0,0)",
+                    "borderwidth": 0,
+                    "steps": [
+                        {"range": [0,   100], "color": "rgba(244,67,54,0.15)"},
+                        {"range": [100, 150], "color": "rgba(255,152,0,0.15)"},
+                        {"range": [150, 200], "color": "rgba(76,175,80,0.15)"},
+                        {"range": [200, 250], "color": "rgba(27,94,32,0.15)"},
+                    ],
+                    "threshold": {
+                        "line": {"color": "rgba(255,255,255,0.5)", "width": 2},
+                        "thickness": 0.85,
+                        "value": r["baseline"],
+                    },
+                },
+            ))
+            fig_yield.update_layout(**plotly_base(300, margin=dict(l=20,r=20,t=20,b=20)))
+            st.plotly_chart(fig_yield, use_container_width=True, config={"staticPlot": True})
+            st.caption(
+                f"Baseline (district avg): <b>{r['baseline']} q/ha</b>. "
+                f"White line marks the baseline. "
+                f"Confidence interval: {r['confidence_interval'][0]}–{r['confidence_interval'][1]} q/ha.",
+                unsafe_allow_html=True,
+            )
+
+        with col_band:
+            # Band card with interpretation
+            st.markdown(
+                f"<div style='border:1px solid {band['color']}40;border-radius:12px;"
+                f"padding:1.2rem 1.5rem;background:{band['color']}08;height:100%;'>"
+                f"<div style='font-size:1.6rem;font-weight:900;color:{band['color']};'>{band['label']}</div>"
+                f"<div style='font-size:0.85rem;color:#aaa;margin:0.3rem 0 0.8rem 0;'>{band['interpretation']}</div>"
+                f"<div style='font-size:0.9rem;color:#ddd;line-height:1.6;'>{band['farmer_action']}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Market readiness indicator
+            readiness = r["market_readiness"]
+            if readiness == "Ready":
+                r_color = "#4caf50"
+                r_icon = "✅"
+            elif readiness == "Prepare":
+                r_color = "#ff9800"
+                r_icon = "🔄"
+            else:
+                r_color = "#666"
+                r_icon = "⏳"
+
+            st.markdown(
+                f"<div style='margin-top:0.8rem;padding:0.6rem 1rem;border-radius:8px;"
+                f"border:1px solid {r_color}40;background:{r_color}08;'>"
+                f"<span style='font-size:0.75rem;text-transform:uppercase;color:#888;'>Market Readiness</span><br>"
+                f"<span style='font-size:1.1rem;font-weight:700;color:{r_color};'>{r_icon} {readiness}</span>"
+                f"<span style='font-size:0.85rem;color:#aaa;margin-left:0.8rem;'>"
+                f"Harvest in ~{r['harvest_window']} days</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        # ── Section 3: Limiting Factor Analysis ─────────────────────────────────
+        st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Yield-Limiting Factors</div>', unsafe_allow_html=True)
+
+        if r["limiting_factors"]:
+            cols = st.columns(len(r["limiting_factors"]))
+            for i, factor in enumerate(r["limiting_factors"]):
+                with cols[i]:
+                    st.markdown(
+                        f"<div style='border:1px solid #f4433640;border-radius:10px;"
+                        f"padding:0.8rem 1rem;background:#f4433608;height:100%;'>"
+                        f"<span style='font-size:0.9rem;color:#ef9a9a;'>⚠️ {factor}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+        else:
+            st.success("No significant yield-limiting factors detected. All parameters are in optimal range.")
+
+        # ── Section 4: Multiplier Breakdown ─────────────────────────────────────
+        st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Factor Contribution Breakdown</div>', unsafe_allow_html=True)
+
+        mults = r["multipliers"]
+        # Remove 'combined' from the list
+        factor_keys = [k for k in mults if k != "combined"]
+        factor_labels = {
+            "soil_moisture": "Soil Moisture",
+            "soil_temperature": "Soil Temperature",
+            "soil_ph": "Soil pH",
+            "npk": "NPK Adequacy",
+            "pest_risk": "Pest Risk",
+            "irrigation": "Irrigation Timeliness",
+            "spray": "Spray Coverage",
+        }
+
+        # Build a horizontal bar chart of multipliers
+        factor_names = [factor_labels.get(k, k) for k in factor_keys]
+        factor_vals = [mults[k] * 100 for k in factor_keys]  # convert to %
+        factor_colors = ["#4caf50" if v >= 90 else "#ff9800" if v >= 75 else "#f44336" for v in factor_vals]
+
+        fig_factors = go.Figure()
+        fig_factors.add_trace(go.Bar(
+            x=factor_vals,
+            y=factor_names,
+            orientation="h",
+            marker=dict(color=factor_colors, line=dict(color=factor_colors, width=1.5)),
+            text=[f"{v:.0f}%" for v in factor_vals],
+            textposition="inside",
+            insidetextanchor="middle",
+            textfont=dict(size=12, color="white"),
+        ))
+        fig_factors.update_layout(
+            **plotly_base(260),
+            xaxis=dict(title="Multiplier Effect on Yield (%)", range=[0, 110], gridcolor="#333"),
+            yaxis=dict(title=""),
+            showlegend=False,
+            bargap=0.3,
+            title=dict(
+                text=f"Combined multiplier: <b>{mults['combined']*100:.1f}%</b> of baseline yield",
+                font=dict(size=13),
+            ),
+        )
+        st.plotly_chart(fig_factors, use_container_width=True, config={"staticPlot": True})
+        st.caption(
+            "Each factor shows how much of the baseline yield it contributes. "
+            "100% = optimal, < 75% = significant penalty. "
+            "The combined multiplier is the product of all seven factors."
+        )
+
+        # ── Section 5: Sensor Correlation ───────────────────────────────────────
+        st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Sensor Correlation</div>', unsafe_allow_html=True)
+
+        corr_data = {
+            "Parameter": ["Soil Moisture", "Soil Temp", "Soil pH", "Nitrogen", "Phosphorus", "Potassium",
+                          "Days Since Irrigation", "Days Since Spray", "Pest Risk", "Days Since Planting"],
+            "Current Value": [
+                f"{current_data.get('soil_moisture', 55):.1f} %",
+                f"{current_data.get('soil_temperature', 25):.1f} °C",
+                f"{current_data.get('soil_ph', 6.2):.2f}",
+                f"{current_data.get('nitrogen', 120):.0f} ppm",
+                f"{current_data.get('phosphorus', 30):.0f} ppm",
+                f"{current_data.get('potassium', 150):.0f} ppm",
+                f"{current_data.get('days_since_irrigation', 0):.0f} d",
+                f"{current_data.get('days_since_last_spray', 0):.0f} d",
+                f"{current_data.get('pest_risk_score', 0):.2f}",
+                f"{st.session_state.days_since_planting:.0f} d",
+            ],
+            "Status": [],
+            "Impact on Yield": [],
+        }
+
+        # Determine status for each parameter
+        moist = current_data.get("soil_moisture", 55)
+        corr_data["Status"].append("✅ Optimal" if 40 <= moist <= 70 else "⚠️ Suboptimal")
+
+        st_temp = current_data.get("soil_temperature", 25)
+        corr_data["Status"].append("✅ Optimal" if 20 <= st_temp <= 30 else "⚠️ Suboptimal")
+
+        ph = current_data.get("soil_ph", 6.2)
+        corr_data["Status"].append("✅ Optimal" if 5.5 <= ph <= 7.0 else "⚠️ Suboptimal")
+
+        n = current_data.get("nitrogen", 120)
+        corr_data["Status"].append("✅ OK" if n >= 80 else "⚠️ Low")
+
+        p = current_data.get("phosphorus", 30)
+        corr_data["Status"].append("✅ OK" if p >= 20 else "⚠️ Low")
+
+        k = current_data.get("potassium", 150)
+        corr_data["Status"].append("✅ OK" if k >= 100 else "⚠️ Low")
+
+        dsi = current_data.get("days_since_irrigation", 0)
+        corr_data["Status"].append("✅ OK" if dsi <= 7 else "⚠️ Overdue")
+
+        dsls = current_data.get("days_since_last_spray", 0)
+        corr_data["Status"].append("✅ OK" if dsls <= 14 else "⚠️ Overdue")
+
+        pr = current_data.get("pest_risk_score", 0)
+        corr_data["Status"].append("✅ Low" if pr < 0.3 else "⚠️ Elevated")
+
+        corr_data["Status"].append(f"{st.session_state.days_since_planting:.0f} / 270 d")
+
+        # Impact on yield
+        impacts = []
+        for mult_key, mult_val in [
+            ("soil_moisture", mults["soil_moisture"]),
+            ("soil_temperature", mults["soil_temperature"]),
+            ("soil_ph", mults["soil_ph"]),
+            ("npk", mults["npk"]),
+            ("npk", mults["npk"]),
+            ("npk", mults["npk"]),
+            ("irrigation", mults["irrigation"]),
+            ("spray", mults["spray"]),
+            ("pest_risk", mults["pest_risk"]),
+            (None, 1.0),
+        ]:
+            if mult_val >= 0.95:
+                impacts.append("🟢 Positive")
+            elif mult_val >= 0.80:
+                impacts.append("🟡 Neutral")
+            else:
+                impacts.append("🔴 Negative")
+
+        corr_data["Impact on Yield"] = impacts
+
+        st.dataframe(
+            pd.DataFrame(corr_data),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Parameter": st.column_config.TextColumn("Parameter", width="medium"),
+                "Current Value": st.column_config.TextColumn("Current Value", width="small"),
+                "Status": st.column_config.TextColumn("Status", width="small"),
+                "Impact on Yield": st.column_config.TextColumn("Impact on Yield", width="small"),
+            },
+        )
+
+        # ── Section 6: Yield History ────────────────────────────────────────────
+        if st.session_state.yield_history:
+            st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-label">Yield Forecast History</div>', unsafe_allow_html=True)
+
+            hist_df = pd.DataFrame(st.session_state.yield_history[-20:])
+            if not hist_df.empty and "yield_qha" in hist_df.columns:
+                fig_history = go.Figure()
+                fig_history.add_trace(go.Scatter(
+                    x=hist_df["timestamp"],
+                    y=hist_df["yield_qha"],
+                    mode="lines+markers",
+                    name="Predicted Yield",
+                    line=dict(color="#4caf50", width=2),
+                    marker=dict(color="#4caf50", size=6),
+                ))
+                # Add baseline reference line
+                fig_history.add_hline(
+                    y=r["baseline"],
+                    line_dash="dash",
+                    line_color="#888",
+                    annotation_text=f"Baseline: {r['baseline']} q/ha",
+                    annotation_font=dict(color="#888", size=11),
+                )
+                fig_history.update_layout(
+                    **plotly_base(240),
+                    xaxis=dict(title="Time", gridcolor="#333"),
+                    yaxis=dict(title="Yield (q/ha)", gridcolor="#333", range=[0, 250]),
+                    showlegend=False,
+                    title=dict(text="Yield Forecast Trend", font=dict(size=13)),
+                )
+                st.plotly_chart(fig_history, use_container_width=True, config={"staticPlot": True})
+                st.caption("Yield forecast updates over time. Each forecast run uses current sensor data.")
+
+    else:
+        # No prediction yet
+        st.info(
+            "Configure your season parameters above, then click **Run Yield Forecast** "
+            "to estimate your expected ginger harvest yield.",
+            icon="📊",
+        )
+
+        # Show yield band reference table
+        st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Yield Band Reference</div>', unsafe_allow_html=True)
+        ref_rows = []
+        for band_key in YIELD_BAND_KEYS:
+            b = YIELD_BANDS[band_key]
+            lo, hi = b["range"]
+            range_str = f"{lo}–{hi} q/ha" if hi < 999 else f"> {lo} q/ha"
+            ref_rows.append({
+                "Band": b["label"],
+                "Range": range_str,
+                "Interpretation": b["interpretation"],
+                "Farmer Action": b["farmer_action"][:80] + "…",
+            })
+        st.dataframe(
+            pd.DataFrame(ref_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Formula explanation
+        with st.expander("📐 How the yield estimate is calculated"):
+            st.markdown("""
+The yield estimate uses a **rule-based heuristic model** that evaluates seven factors:
+
+| Factor | Weight | Conditions |
+|--------|--------|------------|
+| Soil moisture | ±20% | Optimal 40–70% |
+| Soil temperature | ±15% | Optimal 20–30°C |
+| Soil pH | ±10% | Optimal 5.5–7.0 |
+| NPK adequacy | ±20% | N ≥ 80, P ≥ 20, K ≥ 100 ppm |
+| Pest risk | −15% max | pest_risk_score × 0.15 penalty |
+| Days since irrigation | −10% max | Penalty starts after 7 days |
+| Days since spray | −10% max | Penalty starts after 14 days |
+
+**Formula:** `Yield = 125 q/ha × product(all 7 multipliers) × random jitter (±5%)`
+
+The baseline of **125 q/ha** is the historical district average for ginger.
+
+> When real farm records become available (> 40 records), replace this heuristic
+> with a **Random Forest Regressor (50 trees, depth 8)** for higher accuracy.
+""")
+
+# ═════════════════════════════════════════════════════════════════════════════
 elif page == "Sensor Data":
     st.markdown('<div class="page-title">Sensor History</div>', unsafe_allow_html=True)
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
@@ -1587,6 +2055,17 @@ Requires **Chrome** or **Edge**. Click **Start** to begin streaming.
 ## Sensor Data
 - Full-history line charts for all five sensors (up to 200 readings per session).
 - Charts are interactive — hover to read exact values, drag to zoom.
+
+---
+
+## Yield Estimation
+1. Set your **season parameters**: planting density, variety, mulching, days since planting.
+2. Click **Run Yield Forecast** to estimate harvest yield (q/ha).
+3. View the **yield band** (Low / Average / Good / High) with farmer action text.
+4. The **yield gauge** shows your forecast vs baseline (125 q/ha district average).
+5. **Limiting factors** identify what's dragging yield down.
+6. The **factor breakdown** shows each sensor's contribution as a multiplier.
+7. **Yield history** chart tracks how your forecast changes over time.
 
 ---
 

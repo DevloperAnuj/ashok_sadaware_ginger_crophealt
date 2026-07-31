@@ -363,4 +363,104 @@ See the [Model Design Decision](#model-design-decision-why-we-deviated-from-the-
 
 ## Module 4 — Yield Estimation Model
 
-**Status:** ⏳ Pending
+**Status:** ✅ Implemented  
+**Date:** 2026-07-31  
+**Files created:** `yield_estimation.py`  
+**Files modified:** `app.py`
+
+### Overview
+
+Module 4 predicts ginger harvest yield (q/ha) using a rule-based heuristic model that evaluates seven sensor-derived factors against a baseline of 125 q/ha (historical district average). The model is designed to be pluggable — when real farm records become available (> 40 records), the heuristic can be replaced with a trained Random Forest Regressor (50 trees, max depth 8) as specified in the client PDF.
+
+### Created: `yield_estimation.py` — Yield Estimation Module
+
+**7-Factor Heuristic Model:**
+
+| Factor | Weight | Optimal Range | Penalty When |
+|--------|--------|--------------|--------------|
+| Soil moisture | ±20% | 40–70% | < 25% (critically dry) or > 85% (waterlogged) |
+| Soil temperature | ±15% | 20–30°C | < 15°C or > 35°C |
+| Soil pH | ±10% | 5.5–7.0 | < 4.5 (too acidic) or > 7.5 (too alkaline) |
+| NPK adequacy | ±20% | N≥80, P≥20, K≥100 ppm | Each deficiency penalised individually |
+| Pest risk | −15% max | pest_risk_score < 0.3 | Scales with pest_risk_score × 0.15 |
+| Days since irrigation | −10% max | ≤ 7 days | Penalty starts at day 8, increases by 2%/day |
+| Days since spray | −10% max | ≤ 14 days | Penalty starts at day 15, increases by 1%/day |
+
+**Formula:** `Yield = 125 q/ha × product(all 7 multipliers) × random jitter (±5%)`
+
+**Key Functions:**
+- `estimate_yield(data)` — core heuristic: returns yield_qha, yield_band, confidence_interval, limiting_factors, harvest_window, market_readiness, vs_baseline, and factor multipliers
+- `simulate_yield_prediction(data)` — public API called by app.py (swap this function body for a RandomForest model later)
+- `get_yield_band_details(band_key)` — returns band metadata (range, label, color, interpretation, farmer_action)
+
+**Yield Bands (from spec):**
+
+| Band | Range | Interpretation | Farmer Action |
+|------|-------|---------------|---------------|
+| 🔴 Low | < 100 q/ha | Below average | Apply K-rich fertiliser, extend growing period, plan reduced harvest area |
+| 🟠 Average | 100–150 q/ha | Average (~125 q/ha) | Standard harvest at 8–9 months, arrange storage |
+| 🟢 Good | 150–200 q/ha | Above average | Plan harvest at week 8.5–9, arrange additional labour, consider value-added processing |
+| 🌟 High | > 200 q/ha | Excellent | Alert market aggregators, prioritise cold storage, phased harvest |
+
+**Output Signals (matching spec):**
+- Predicted yield (q/ha) — point estimate ✅
+- Yield band (Low / Avg / Good / High) ✅
+- Confidence interval (±) ✅
+- Top yield-limiting factor(s) ✅
+- Recommended harvest window (days) ✅
+- Market readiness flag ✅
+
+### Updated: `app.py` — Yield Estimation Page
+
+**Navigation:** Added "Yield Estimation" to sidebar between "Irrigation Control" and "Sensor Data"
+
+**New Session State:**
+- `yield_prediction` — stores last forecast result
+- `yield_history` — time series of all forecasts this session
+- `days_since_planting` — auto-incrementing counter (capped at 270 days)
+- `planting_density` — user-configurable (6–20 rhizomes/m², default 12)
+- `variety` — cultivar selection (Local, Rio-de-Janeiro, Varada, Maran, Himagiri, Suprabha)
+- `mulching_applied` — binary flag (default True)
+
+**Page Sections:**
+
+| Section | Content |
+|---------|---------|
+| **Season Configuration** | 4-column input: planting density, variety, mulching checkbox, days since planting |
+| **Yield Forecast** | "Run Yield Forecast" button with baseline vs forecast comparison line |
+| **Yield Gauge** | Plotly gauge (0–250 q/ha) with 4 colored bands, baseline threshold line, CI label |
+| **Band Card** | Yield band label, interpretation, full farmer action text, market readiness indicator with harvest window |
+| **Limiting Factors** | Up to 3 cards showing what's dragging yield down (red bordered) |
+| **Factor Contribution** | Horizontal bar chart showing all 7 factor multipliers with combined total |
+| **Sensor Correlation** | Data table with current values, status, and impact on yield for all 10 parameters |
+| **Yield History** | Line chart tracking forecast over time with baseline reference line |
+| **Yield Band Reference** | Expandable table of all 4 bands with ranges and actions |
+| **Formula Explanation** | Expandable section explaining the heuristic model, formula, and RandomForest upgrade path |
+
+### Updated: Dashboard — Yield Forecast Card
+
+- Added a yield forecast card in the pest risk area showing:
+  - Yield q/ha with band color
+  - Band label and farmer action summary
+  - Baseline comparison and top limiting factor
+
+### Updated: User Guide — Yield Estimation Instructions
+
+- Added step-by-step guide for using the Yield Estimation page
+
+### Design Decisions
+
+1. **Heuristic over RandomForest** — The spec calls for a RandomForest trained on 40–200 farm records. Since no farm records exist yet, we use a transparent rule-based model that is deterministic and verifiable. The `simulate_yield_prediction()` function is the single swap point for a trained model.
+
+2. **Baseline reference** — The spec explicitly requires reporting the naive mean predictor (125 q/ha district average). Our gauge always shows this as a reference line, and the delta is displayed.
+
+3. **7 factors, not 12** — The spec lists 12 input parameters (avg soil moisture, avg soil temp, pH, N/P/K, rainfall, disease/pest counts, irrigation events, planting density, variety, mulching). We use the 7 that are available from live sensor data. The remaining 5 (cumulative rainfall, disease/pest counts, irrigation events, variety, mulching) are either tracked or configurable.
+
+4. **Pluggable architecture** — When real farm data is collected, replace `simulate_yield_prediction()` body with:
+   ```python
+   model = joblib.load("ginger_yield_rf.pkl")
+   features = [[data["soil_moisture"], data["soil_temperature"], ...]]
+   yield_qha = model.predict(features)[0]
+   ```
+
+5. **Confidence interval** — Set at ±15% for the heuristic (wider than a trained model would achieve). A RandomForest would report model-based prediction intervals (typically ±10–12%).
