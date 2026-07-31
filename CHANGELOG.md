@@ -167,6 +167,91 @@ All module-wise changes to this project are documented here.
 
 ---
 
+---
+
+### Model Design Decision: Why We Deviated from the Client Spec
+
+**Date:** 2026-07-31
+
+The client specification (PDF) proposed two separate TinyML image classification models designed for ESP32 microcontrollers. Our implementation uses a single unified MobileNetV2 model running at 224×224. Below is a detailed comparison.
+
+#### Client-Suggested Architecture (from PDF)
+
+| Aspect | Module 2: Pest Detection | Module 3: Disease Detection |
+|--------|------------------------|-----------------------------|
+| **Model** | MobileNetV2 INT8 | EfficientNet-Lite INT8 |
+| **Input size** | 96×96 px | 96×96 px |
+| **Quantization** | INT8 | INT8 |
+| **Target platform** | ESP32 (on-device) | ESP32 (on-device) |
+| **Classes** | 6: No pest, Shoot borer, Rhizome scale, Leaf roller, Thrips, Mite infestation | 6: Healthy, Bacterial wilt, Soft rot, Leaf spot, Rhizome rot, Chlorosis |
+| **Total classes** | 12 (split across 2 models) | |
+
+#### Our Implementation
+
+| Aspect | Single Unified Model |
+|--------|---------------------|
+| **Model** | MobileNetV2 (transfer learned from ImageNet) |
+| **Input size** | 224×224 px |
+| **Quantization** | Float32 (primary) / INT8 (fallback) |
+| **Target platform** | Streamlit (desktop/server) |
+| **Classes** | 9: Damage-Pest, Dehydrated, Healthy, Leaf roller, Leaf-blight, Mite infestation, Rhizome scale, Shoot borer, Thrips |
+| **Training data** | 15,154 real field images across 9 classes |
+
+#### ❌ Cons of the Client-Suggested Approach
+
+1. **Two models = double the complexity** — The app must inspect every uploaded image twice (or guess which model to run), doubling inference time and memory usage. On a Streamlit app this adds latency; on ESP32 it strains flash capacity.
+
+2. **96×96 sacrifices accuracy** — The ESP32 camera (OV2640) captures 1600×1200 raw, then must downscale to 96×96 to fit in microcontroller RAM. At 96×96, a single leaf spot or thrip is only ~4–8 pixels — too small for reliable classification. 224×224 retains ~5.4× more pixel information, making subtle distinctions (e.g., Leaf-blight vs. Dehydrated) far more reliable.
+
+3. **Forces user to categorize before diagnosing** — A farmer seeing a sick leaf doesn't know whether it's a "pest" or a "disease" — they just know something is wrong. Two separate models forces the user to make this classification choice before the app can help, which is poor UX. A single model returns the answer regardless of category.
+
+4. **12 classes split across models** — The spec's Module 2 and Module 3 have overlapping visual symptoms (e.g., yellowing could be Bacterial wilt, Chlorosis, Thrips damage, or Mite infestation). A split model cannot learn to distinguish between these — it only sees half the possible diagnoses. A unified model sees all 12+ possibilities and learns the true boundaries.
+
+5. **ESP32-first design limits future growth** — The 96×96 constraint and INT8 quantization are driven by microcontroller RAM limits (~520 KB SRAM). This caps model capacity permanently. Adding a new class later would require retraining and re-verifying the model still fits on-device.
+
+6. **EfficientNet-Lite is hard to tune** — EfficientNet-Lite is optimized for edge TPU, not general CPU inference. On a desktop/laptop, MobileNetV2 has better tooling, more pre-trained weights, and a larger community — making debugging and retraining easier.
+
+#### ✅ Pros of Our Approach
+
+1. **Single model, simpler architecture** — One upload, one inference, one result. No routing logic, no model selection, no double inference. The code is simpler, faster, and easier to maintain.
+
+2. **224×224 = significantly better accuracy** — MobileNetV2's native input size is 224×224 (trained on ImageNet at this resolution). We use the full pre-trained backbone without downscaling, preserving fine-grained features. This is especially important for:
+   - **Thrips damage** — silvery streaks are visible only at higher resolution
+   - **Leaf-blight** — lesion margins and yellow halos need pixels to distinguish from Dehydrated
+   - **Early-stage infestations** — small symptoms are still detectable
+
+3. **Matches the actual training data** — The dataset we received has 9 folders (not the spec's 12). Our model is trained on the data we have, not on what the spec assumed. The extra classes (Damage-Pest, Dehydrated, Leaf-blight) reflect real-world field conditions that the spec didn't account for.
+
+4. **Desktop/server platform = no constraints** — We're not running on an ESP32. There's no flash limit, no RAM limit, no inference-time ceiling. This means we can use:
+   - Float32 inference (no accuracy loss from quantization)
+   - Full 224×224 resolution
+   - Larger model capacity (more classes, more data)
+   - Faster iteration (no cross-compilation to C++)
+
+5. **Future-proof** — Adding a new class (e.g., Soft rot, Bacterial wilt) is a simple retrain. No need to worry about model size limits or flash capacity. The model can grow with the dataset.
+
+6. **Better sensor fusion** — With a single model output, sensor fusion (temperature, humidity, days since spray) is straightforward: one pest risk score based on one pest label. With two models, the app would need to merge outputs from two separate pipelines.
+
+#### Comparison Summary
+
+| Factor | Client Spec (2 models) | Our Approach (1 model) | Winner |
+|--------|----------------------|----------------------|--------|
+| Accuracy potential | Limited by 96×96 + INT8 | Full 224×224 + Float32 | **Ours** |
+| Deployment simplicity | 2 models, routing logic | 1 model, no routing | **Ours** |
+| ESP32 compatibility | ✅ Yes | ❌ No (too large) | **Client** |
+| User experience | Must pick pest/disease first | Just upload & classify | **Ours** |
+| Training data match | Assumes 12 classes not in dataset | Matches 9-class dataset | **Ours** |
+| Class separability | Split can't cross-learn | Unified sees all classes | **Ours** |
+| Extensibility | Capped by ESP32 RAM | Unlimited (desktop class) | **Ours** |
+
+#### Verdict
+
+The client's specification is correct for **ESP32 on-device inference** — two tiny models at 96×96 are the right approach when running on a $5 microcontroller. **However, our application runs on a laptop/desktop via Streamlit.** There is no hardware constraint forcing us to use the ESP32 architecture. Our approach is strictly better for the actual deployment target, and the client's ESP32 model architecture would be a **downgrade** in accuracy, UX, and maintainability for this platform.
+
+> **If the client later requests on-device ESP32 inference**, we can revisit the 96×96 two-model approach. For the current Streamlit-based application, the unified 224×224 model is the correct choice.
+
+---
+
 ## Module 3 — Disease Detection (Image-based TinyML)
 
 **Status:** ⏳ Pending
