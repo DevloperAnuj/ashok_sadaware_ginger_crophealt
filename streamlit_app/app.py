@@ -253,12 +253,12 @@ if st.session_state.data_source == "Bluetooth":
     if _bt.connected:
         st.sidebar.success(f"Connected · **{_bt.device_name}** ({_bt.port})")
         _latest_bt = _bt.get_latest()
-        if _latest_bt:
+        if _latest_bt and 'temperature' in _latest_bt:
             st.sidebar.caption(
-                f"T: {_latest_bt['temperature']}°C  "
-                f"H: {_latest_bt['humidity']}%  "
-                f"M: {_latest_bt['soil_moisture']}%  "
-                f"pH: {_latest_bt['soil_ph']}"
+                f"T: {_latest_bt.get('temperature', '?')}°C  "
+                f"H: {_latest_bt.get('humidity', '?')}%  "
+                f"M: {_latest_bt.get('soil_moisture', '?')}%  "
+                f"pH: {_latest_bt.get('soil_ph', '?')}"
             )
         else:
             st.sidebar.caption("Waiting for first packet…")
